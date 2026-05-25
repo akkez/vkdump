@@ -99,28 +99,43 @@ class TaskPanel(QWidget):
         self._form_host.addWidget(form_widget)
 
     def _make_editor(self, p: ParamSpec) -> QWidget:
-        if p.type in ("dir", "path"):
+        if p.type in ("dir", "path", "path_any"):
             row = QWidget()
             line = QLineEdit()
             line.setObjectName(f"{p.name}__edit")
             if p.default is not None:
                 line.setText(str(p.default))
             line.setPlaceholderText(p.help or "")
-            browse = QPushButton("Browse…")
 
-            def on_browse() -> None:
-                if p.type == "dir":
-                    path = QFileDialog.getExistingDirectory(self, f"Select {p.label}")
-                else:
-                    path, _ = QFileDialog.getOpenFileName(self, f"Select {p.label}")
-                if path:
-                    line.setText(path)
-
-            browse.clicked.connect(on_browse)
             layout = QHBoxLayout(row)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.addWidget(line, 1)
-            layout.addWidget(browse)
+
+            def pick_file() -> None:
+                path, _ = QFileDialog.getOpenFileName(self, f"Select {p.label}")
+                if path:
+                    line.setText(path)
+
+            def pick_dir() -> None:
+                path = QFileDialog.getExistingDirectory(self, f"Select {p.label}")
+                if path:
+                    line.setText(path)
+
+            if p.type == "dir":
+                btn = QPushButton("Folder…")
+                btn.clicked.connect(pick_dir)
+                layout.addWidget(btn)
+            elif p.type == "path":
+                btn = QPushButton("File…")
+                btn.clicked.connect(pick_file)
+                layout.addWidget(btn)
+            else:  # path_any
+                file_btn = QPushButton("File…")
+                file_btn.clicked.connect(pick_file)
+                dir_btn = QPushButton("Folder…")
+                dir_btn.clicked.connect(pick_dir)
+                layout.addWidget(file_btn)
+                layout.addWidget(dir_btn)
             return row
         if p.type == "int":
             sb = QSpinBox()
@@ -143,7 +158,7 @@ class TaskPanel(QWidget):
         out: dict[str, Any] = {}
         for p in task.params:
             editor = self._editors[p.name]
-            if p.type in ("dir", "path"):
+            if p.type in ("dir", "path", "path_any"):
                 line = editor.findChild(QLineEdit)
                 text = line.text().strip() if line else ""
                 if not text and p.required:

@@ -9,10 +9,10 @@ TASKS: list[TaskSpec] = [
         description="Read a VK dump directory and load chats / users / messages / attachments into SQLite.",
         params=[
             ParamSpec(
-                name="source_dir",
-                type="dir",
-                label="Dump directory",
-                help="Either a single chat folder (containing messagesN.html) or a parent containing such folders.",
+                name="source",
+                type="path_any",
+                label="Dump source",
+                help="A VK dump: ZIP archive, archive root folder, messages/ folder, single chat folder, or a single HTML file.",
             ),
             ParamSpec(
                 name="source_timezone",

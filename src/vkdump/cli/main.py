@@ -1,7 +1,10 @@
+import json
+from datetime import date, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 import typer
 from rich.console import Console
+from rich.json import JSON
 from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 from rich.table import Table
 
@@ -58,7 +61,9 @@ def _run(task_name: str, params: dict) -> None:
             raise typer.Exit(130)
 
     if outcome.status == "success":
-        console.print(f"[green]ok[/green] run #{outcome.run_id}: {outcome.result}")
+        console.print(f"[green]ok[/green] run #{outcome.run_id}")
+        if outcome.result is not None:
+            console.print(_render_result(outcome.result))
     elif outcome.status == "cancelled":
         console.print(f"[yellow]cancelled[/yellow] run #{outcome.run_id}")
         raise typer.Exit(130)
@@ -67,9 +72,37 @@ def _run(task_name: str, params: dict) -> None:
         raise typer.Exit(1)
 
 
+def _json_default(value: Any) -> Any:
+    """Coerce non-JSON-serialisable values to something printable."""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, set):
+        return sorted(value)
+    return str(value)
+
+
+def _render_result(result: Any) -> JSON | str:
+    """Render a task result as pretty, colourised JSON. Falls back to repr
+    when the value can't be coerced (e.g. contains a circular reference)."""
+    try:
+        text = json.dumps(
+            result, indent=2, ensure_ascii=False, default=_json_default, sort_keys=False
+        )
+        return JSON(text)
+    except (TypeError, ValueError):
+        return repr(result)
+
+
 @app.command("parse-dump")
 def parse_dump_cmd(
-    source_dir: Annotated[Path, typer.Argument(help="Path to the unzipped VK dump folder.")],
+    source: Annotated[
+        Path,
+        typer.Argument(
+            help="A VK dump: ZIP archive, archive root folder, messages/ folder, single chat folder, or one HTML file.",
+        ),
+    ],
     source_tz: Annotated[
         str,
         typer.Option(
@@ -78,8 +111,8 @@ def parse_dump_cmd(
         ),
     ] = "UTC",
 ) -> None:
-    """Parse a VK dump directory into SQLite (chats, users, messages, attachments)."""
-    _run("parse-dump", {"source_dir": source_dir, "source_timezone": source_tz})
+    """Parse a VK dump into SQLite (chats, users, messages, attachments)."""
+    _run("parse-dump", {"source": source, "source_timezone": source_tz})
 
 
 @app.command("enrich")

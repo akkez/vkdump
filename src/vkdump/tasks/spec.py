@@ -3,7 +3,7 @@ from typing import Any, Callable, Literal
 from ..core.progress import ProgressReporter
 
 
-ParamType = Literal["str", "int", "bool", "path", "dir"]
+ParamType = Literal["str", "int", "bool", "path", "dir", "path_any"]
 
 
 @dataclass

@@ -49,7 +49,7 @@ PROVIDER = "vk"
 
 
 def run(params: dict, progress: ProgressReporter) -> dict:
-    source_input = Path(params["source_dir"]).expanduser()
+    source_input = Path(params["source"]).expanduser()
     source_tz = (params.get("source_timezone") or "UTC").strip() or "UTC"
 
     discovery = discover(source_input)

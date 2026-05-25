@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, QThreadPool, Signal
+from PySide6.QtCore import Qt, QObject, QRunnable, QThreadPool, Signal, Slot
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -23,6 +23,38 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from rich.text import Text
+
+
+class _ResultsLoaderSignals(QObject):
+    done = Signal(dict)
+    failed = Signal(str)
+
+
+class _ResultsLoader(QRunnable):
+    """Run the three SQL rollups off the GUI thread. The dialog is
+    cheap to build once the data is in hand; the heavy step is the
+    aggregation."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.signals = _ResultsLoaderSignals()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            from ..core.stats_views import (
+                attachments_rollup, chats_rollup, users_rollup,
+            )
+            min_messages = 10
+            data = {
+                "chats": chats_rollup(min_messages=min_messages),
+                "users": users_rollup(min_messages=min_messages),
+                "attachments": attachments_rollup(),
+                "min_messages": min_messages,
+            }
+            self.signals.done.emit(data)
+        except Exception as exc:  # noqa: BLE001
+            self.signals.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
 class _ClickyLineEdit(QLineEdit):
@@ -346,8 +378,24 @@ class TaskPanel(QWidget):
         self._active_worker = None
 
     def _on_view_results(self) -> None:
-        dlg = ResultsDialog(self)
-        dlg.exec()
+        # Heavy SQL rollups run off the GUI thread; the button shows
+        # `Loading…` and gets re-enabled when the loader finishes.
+        self._results_btn.setEnabled(False)
+        self._results_btn.setText("Loading…")
+        loader = _ResultsLoader()
+        loader.signals.done.connect(self._on_results_ready)
+        loader.signals.failed.connect(self._on_results_failed)
+        self._pool.start(loader)
+
+    def _on_results_ready(self, data: dict) -> None:
+        self._results_btn.setEnabled(True)
+        self._results_btn.setText("View results…")
+        ResultsDialog(self, data).exec()
+
+    def _on_results_failed(self, error: str) -> None:
+        self._results_btn.setEnabled(True)
+        self._results_btn.setText("View results…")
+        self._status.setText(f"results failed: {error}")
 
     def _on_finished(self, run_id: int, result: object) -> None:
         self._status.setText(f"ok — run #{run_id}")

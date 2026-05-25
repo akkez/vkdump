@@ -1,8 +1,8 @@
-"""Results dialog shown after a task completes — tabbed read-only
-view over the rollups in `core.stats_views`.
+"""Results dialog shown after a task completes.
 
-Three tabs: chats, users, attachments. Each is a QTableView driven by
-a tiny dict-list model so the SQL layer can stay schema-agnostic.
+Reads its three tables from a pre-computed payload (the heavy SQL
+rollups run in a worker, see `task_panel._ResultsLoader`) so the UI
+thread never blocks on the dialog opening.
 """
 from __future__ import annotations
 
@@ -12,20 +12,17 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtWidgets import (
     QDialog,
     QHeaderView,
+    QLabel,
     QTabWidget,
     QTableView,
     QVBoxLayout,
+    QWidget,
 )
-
-from ..core.stats_views import attachments_rollup, chats_rollup, users_rollup
 
 
 class _DictListModel(QAbstractTableModel):
-    """Read-only model over `list[dict]` rows.
-
-    `columns` is a list of `(key, header)` pairs deciding which fields
-    show up and in what order.
-    """
+    """Read-only model over `list[dict]` rows. `columns` is a list of
+    `(key, header)` pairs."""
 
     def __init__(self, rows: Sequence[dict[str, Any]], columns: Sequence[tuple[str, str]]) -> None:
         super().__init__()
@@ -74,63 +71,106 @@ def _make_table(rows: Sequence[dict[str, Any]], columns: Sequence[tuple[str, str
     return table
 
 
-class ResultsDialog(QDialog):
-    """Read-only summary window: three tabs over the SQLite store."""
+def _wrap_with_footer(table: QTableView, footer: str | None) -> QWidget:
+    """Stack a table over an optional grey footer label (used to show
+    the count of rows hidden by the message-count threshold).
+    """
+    holder = QWidget()
+    layout = QVBoxLayout(holder)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.addWidget(table, 1)
+    if footer:
+        lbl = QLabel(footer)
+        lbl.setStyleSheet("color: gray; padding: 4px 2px;")
+        layout.addWidget(lbl)
+    return holder
 
-    def __init__(self, parent=None) -> None:
+
+# Column layouts kept here so the dialog can stay dumb / mechanical.
+_CHAT_COLS: list[tuple[str, str]] = [
+    ("title", "Title"),
+    ("peer_id", "peer_id"),
+    ("type", "Type"),
+    ("message_count", "Messages"),
+    ("attachment_count", "Attachments"),
+    ("photo_count", "Photos"),
+    ("video_count", "Videos"),
+    ("audio_count", "Audios"),
+    ("file_count", "Files"),
+    ("forward_count", "Forwards"),
+    ("link_count", "Links"),
+    ("sticker_count", "Stickers"),
+    ("other_count", "Other"),
+    ("last_message_at", "Last message"),
+]
+
+_USER_COLS: list[tuple[str, str]] = [
+    ("display_name", "Name"),
+    ("vk_id", "vk_id"),
+    ("message_count", "Messages"),
+    ("attachment_count", "Attachments"),
+    ("photo_count", "Photos"),
+    ("video_count", "Videos"),
+    ("audio_count", "Audios"),
+    ("file_count", "Files"),
+    ("forward_count", "Forwards"),
+    ("link_count", "Links"),
+    ("sticker_count", "Stickers"),
+    ("other_count", "Other"),
+    ("profile_url", "Profile URL"),
+]
+
+_ATT_COLS: list[tuple[str, str]] = [
+    ("kind", "Kind"),
+    ("total", "Count"),
+    ("first_seen_at", "First seen"),
+    ("last_seen_at", "Last seen"),
+    ("last_chat_title", "Last seen in chat"),
+    ("last_chat_peer", "peer_id"),
+]
+
+
+class ResultsDialog(QDialog):
+    """Tabbed read-only summary. Expects `data` from `_ResultsLoader`."""
+
+    def __init__(self, parent, data: dict[str, Any]) -> None:
         super().__init__(parent)
         self.setWindowTitle("vkdump — results")
-        self.resize(1100, 700)
+        self.resize(1200, 720)
+
+        chats, chats_hidden = data["chats"]
+        users, users_hidden = data["users"]
+        attachments = data["attachments"]
+        min_messages = data.get("min_messages", 10)
 
         tabs = QTabWidget()
-
-        # Chats tab.
-        chat_cols = [
-            ("title", "Title"),
-            ("peer_id", "peer_id"),
-            ("source_folder", "Folder"),
-            ("type", "Type"),
-            ("message_count", "Messages"),
-            ("attachment_count", "Attachments"),
-            ("photo_count", "Photos"),
-            ("video_count", "Videos"),
-            ("audio_count", "Audios"),
-            ("file_count", "Files"),
-            ("forward_count", "Forwards"),
-            ("link_count", "Links"),
-            ("sticker_count", "Stickers"),
-            ("other_count", "Other"),
-            ("last_message_at", "Last message"),
-        ]
-        tabs.addTab(_make_table(chats_rollup(), chat_cols), "Chats")
-
-        # Users tab.
-        user_cols = [
-            ("display_name", "Name"),
-            ("vk_id", "vk_id"),
-            ("is_deleted", "Deleted"),
-            ("message_count", "Messages"),
-            ("attachment_count", "Attachments"),
-            ("photo_count", "Photos"),
-            ("video_count", "Videos"),
-            ("audio_count", "Audios"),
-            ("file_count", "Files"),
-            ("forward_count", "Forwards"),
-            ("link_count", "Links"),
-            ("sticker_count", "Stickers"),
-            ("other_count", "Other"),
-            ("profile_url", "Profile URL"),
-        ]
-        tabs.addTab(_make_table(users_rollup(), user_cols), "Users")
-
-        # Attachments tab.
-        att_cols = [
-            ("kind", "Kind"),
-            ("total", "Count"),
-            ("first_seen_at", "First seen"),
-            ("last_seen_at", "Last seen"),
-        ]
-        tabs.addTab(_make_table(attachments_rollup(), att_cols), "Attachments")
+        tabs.addTab(
+            _wrap_with_footer(
+                _make_table(chats, _CHAT_COLS),
+                _hidden_footer(chats_hidden, "chat", min_messages),
+            ),
+            f"Chats ({len(chats)})",
+        )
+        tabs.addTab(
+            _wrap_with_footer(
+                _make_table(users, _USER_COLS),
+                _hidden_footer(users_hidden, "user", min_messages),
+            ),
+            f"Users ({len(users)})",
+        )
+        tabs.addTab(
+            _wrap_with_footer(_make_table(attachments, _ATT_COLS), None),
+            f"Attachments ({len(attachments)})",
+        )
 
         layout = QVBoxLayout(self)
         layout.addWidget(tabs)
+
+
+def _hidden_footer(hidden: int, noun: str, threshold: int) -> str | None:
+    if not hidden:
+        return None
+    return (
+        f"{hidden} {noun}{'s' if hidden != 1 else ''} hidden — "
+        f"fewer than {threshold} messages."
+    )

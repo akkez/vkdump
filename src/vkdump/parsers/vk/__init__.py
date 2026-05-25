@@ -6,6 +6,7 @@ from .index import (
     CHAT_TYPE_GROUP_CHAT,
     ChatIndexEntry,
     chat_type_for_peer,
+    extract_account_id,
     parse_messages_index,
     parse_messages_index_file,
 )
@@ -64,6 +65,7 @@ __all__ = [
     "chat_type_for_peer",
     "decode_dump_bytes",
     "discover",
+    "extract_account_id",
     "is_message_page_filename",
     "list_message_pages",
     "looks_like_chat_folder",

@@ -38,14 +38,21 @@ from ..parsers.vk import (
     ProfileInfo,
     Source,
     chat_type_for_peer,
+    decode_dump_bytes,
     discover,
+    extract_account_id,
     list_message_pages,
     parse_chat_meta,
+    parse_messages_index,
     parse_messages_index_file,
     parse_page,
     parse_profile_file,
     read_page,
 )
+# `_parse_messages_index_str` reuses the same string-parsing function as
+# `parse_messages_index_file`, but we pass the raw HTML in directly so we
+# don't have to read the file twice (once for entries, once for jd).
+_parse_messages_index_str = parse_messages_index
 
 PROVIDER = "vk"
 
@@ -84,11 +91,21 @@ def _run_with_discovery(
 
     # ---------- optional: messages index (chat titles + peer ids) ----------
     indexed_entries: dict[str, ChatIndexEntry] = {}
+    # Dump owner stringified. Same value sits in the jd meta of every
+    # HTML page in one archive, so any of profile / messages-index /
+    # first chat page will yield it. We resolve it once and propagate.
+    account_id: str = str(owner_vk_id) if owner_vk_id else ""
     if discovery.messages_index_file is not None:
         try:
-            entries = parse_messages_index_file(source, discovery.messages_index_file)
+            raw = decode_dump_bytes(source.read_bytes(discovery.messages_index_file))
+            entries = _parse_messages_index_str(raw)
+            if not account_id:
+                index_owner = extract_account_id(raw)
+                if index_owner:
+                    account_id = index_owner
+                    progress.log(f"account_id resolved from messages-index: {account_id}")
             indexed_entries = {e.peer_folder: e for e in entries}
-            _preload_chats_from_index(entries, source_tz)
+            _preload_chats_from_index(entries, source_tz, account_id=account_id)
             progress.log(f"messages-index: preloaded {len(entries)} chat row(s) with titles")
         except Exception:
             logger.exception("messages-index parsing failed for {}", discovery.messages_index_file)
@@ -129,6 +146,21 @@ def _run_with_discovery(
             "parse_dump: scanning {} chat folder(s), {} pages",
             len(chat_plans), global_total,
         )
+        # Last-resort account_id resolution: if neither profile nor
+        # messages-index supplied it, peek at the first chat's first
+        # page jd meta. Same id, same archive.
+        if not account_id and chat_plans:
+            first_pages = chat_plans[0][2]
+            if first_pages:
+                try:
+                    raw_first = decode_dump_bytes(source.read_bytes(first_pages[0]))
+                    first_owner = extract_account_id(raw_first)
+                    if first_owner:
+                        account_id = first_owner
+                        progress.log(f"account_id resolved from first chat jd: {account_id}")
+                except Exception:
+                    logger.exception("failed to peek at jd of {}", first_pages[0])
+
         # Clear prior parse errors only for chats we're about to re-parse.
         # Errors from chats outside this run (e.g. from a previous parse of
         # a different archive) remain inspectable via `vkdump logs list`.
@@ -160,7 +192,11 @@ def _run_with_discovery(
                     index_entry = indexed_entries.get(chat_name)
                     chat_label = _format_chat_label(chat_name, index_entry)
                     page_count_for_chat = max(len(pages), 1)
-                    chat_bar.report(0, page_count_for_chat, f"[cyan]chat:[/cyan] {chat_label}")
+                    chat_bar.report(
+                        0, page_count_for_chat,
+                        f"[cyan]chat:[/cyan] {chat_label} "
+                        f"({_plural(len(pages), 'page')})",
+                    )
 
                     def _on_page_done(_label: str = chat_label) -> None:
                         nonlocal global_done
@@ -178,6 +214,7 @@ def _run_with_discovery(
                         progress=chat_bar,
                         source_tz=source_tz,
                         index_entry=index_entry,
+                        account_id=account_id,
                         on_page_done=_on_page_done,
                     )
                     total_messages += summary["parsed_messages"]
@@ -206,6 +243,7 @@ def _run_with_discovery(
                 chat_name=chat_name,
                 source_tz=source_tz,
                 index_entry=indexed_entries.get(chat_name),
+                account_id=account_id,
             )
             total_messages += summary["parsed_messages"]
             total_errors += summary["errors"]
@@ -321,10 +359,15 @@ def _apply_profile(profile: ProfileInfo) -> int | None:
     return profile.vk_id
 
 
-def _preload_chats_from_index(entries: list[ChatIndexEntry], source_tz: str) -> None:
+def _preload_chats_from_index(
+    entries: list[ChatIndexEntry], source_tz: str, account_id: str
+) -> None:
     """Insert chat rows we know about from the index, even before parsing any
     individual chat folder. Title + peer_id + type land immediately; counters
     stay at their defaults until the per-folder parse runs.
+
+    `account_id` is the dump owner's vk_id (or "" only as a last-resort
+    fallback when we couldn't resolve it from profile / index jd).
     """
     with connection() as conn:
         for e in entries:
@@ -343,7 +386,7 @@ def _preload_chats_from_index(entries: list[ChatIndexEntry], source_tz: str) -> 
                 """,
                 (
                     PROVIDER,
-                    "",  # account_id unknown at this stage; per-folder parse fills it.
+                    account_id,
                     e.peer_folder,
                     e.title,
                     str(e.peer_id) if e.peer_id is not None else None,
@@ -364,6 +407,7 @@ def _parse_one_chat(
     progress: ProgressReporter,
     source_tz: str,
     index_entry: ChatIndexEntry | None,
+    account_id: str,
     on_page_done: "Callable[[], None] | None" = None,
 ) -> dict:
     if not pages:
@@ -376,7 +420,13 @@ def _parse_one_chat(
 
     first_html = read_page(source, pages[0])
     meta = parse_chat_meta(first_html, source_folder=chat_name)
-    chat_id = _upsert_chat(meta, source_tz=source_tz, index_entry=index_entry)
+    # Trust the resolved-once `account_id` over whatever jd says inside
+    # this particular chat — same archive must reduce to one owner.
+    effective_account_id = account_id or meta.account_id or ""
+    chat_id = _upsert_chat(
+        meta, source_tz=source_tz, index_entry=index_entry,
+        account_id=effective_account_id,
+    )
 
     page_count = len(pages)
     parsed_messages = 0
@@ -416,7 +466,7 @@ def _parse_one_chat(
             inserted = _insert_messages_conn(
                 conn,
                 chat_id=chat_id,
-                account_id=meta.account_id or "",
+                account_id=effective_account_id,
                 messages=messages,
             )
             if parse_errors:
@@ -458,6 +508,7 @@ def _parse_single_page(
     chat_name: str,
     source_tz: str,
     index_entry: ChatIndexEntry | None,
+    account_id: str,
 ) -> dict:
     """Parse one stand-alone messagesN.html page. Chat row is upserted using
     metadata read from the page; counters reflect only what this page
@@ -466,7 +517,11 @@ def _parse_single_page(
     page_name = page_rel.rsplit("/", 1)[-1]
     first_html = read_page(source, page_rel)
     meta = parse_chat_meta(first_html, source_folder=chat_name)
-    chat_id = _upsert_chat(meta, source_tz=source_tz, index_entry=index_entry)
+    effective_account_id = account_id or meta.account_id or ""
+    chat_id = _upsert_chat(
+        meta, source_tz=source_tz, index_entry=index_entry,
+        account_id=effective_account_id,
+    )
     with connection() as conn:
         try:
             messages, parse_errors = parse_page(first_html, source_file=page_name)
@@ -493,7 +548,7 @@ def _parse_single_page(
             }
 
         inserted = _insert_messages_conn(
-            conn, chat_id=chat_id, account_id=meta.account_id or "", messages=messages
+            conn, chat_id=chat_id, account_id=effective_account_id, messages=messages
         )
         if parse_errors:
             _insert_parse_errors_conn(
@@ -572,9 +627,17 @@ def _peer_id_from_folder(name: str) -> int | None:
 
 
 def _upsert_chat(
-    meta: ParsedChatMeta, source_tz: str, index_entry: ChatIndexEntry | None
+    meta: ParsedChatMeta,
+    source_tz: str,
+    index_entry: ChatIndexEntry | None,
+    account_id: str,
 ) -> int:
-    """Insert or update the chat row, return its primary key."""
+    """Insert or update the chat row, return its primary key.
+
+    `account_id` is the resolved dump owner — same value the index
+    preload used, so the per-folder parse hits the SAME row (no
+    dangling stub with account_id='').
+    """
     title = meta.title or (index_entry.title if index_entry else None)
     if index_entry is not None:
         peer_int = index_entry.peer_id
@@ -605,7 +668,7 @@ def _upsert_chat(
             """,
             (
                 PROVIDER,
-                meta.account_id or "",
+                account_id,
                 meta.source_folder,
                 title,
                 meta.total_expected_count,
@@ -617,11 +680,9 @@ def _upsert_chat(
         ).fetchone()
         chat_id = int(row["id"])
 
-        # If a chat row was pre-created from the messages index with
-        # account_id='', migrate it to the real account_id we just learned
-        # (i.e. delete the dangling stub so we don't carry two rows for the
-        # same chat).
-        if meta.account_id:
+        # Sweep up any leftover account_id='' stub from an older run
+        # that pre-loaded before we could resolve the owner.
+        if account_id:
             conn.execute(
                 """
                 DELETE FROM chats

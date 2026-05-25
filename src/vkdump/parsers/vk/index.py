@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass
 from html import unescape
 
-from .messages import decode_dump_bytes
+from .messages import _decode_jd_meta, decode_dump_bytes
 from .sources import Source
 
 
@@ -50,6 +50,18 @@ def parse_messages_index(html: str) -> list[ChatIndexEntry]:
             ChatIndexEntry(peer_folder=peer_folder, title=title, peer_id=peer_id)
         )
     return out
+
+
+def extract_account_id(html: str) -> str | None:
+    """Pull the dump owner's vk_id (numeric, stringified) from the
+    `<meta name="jd">` payload that VK embeds on every dump page. Same
+    value across every HTML file in one archive.
+    """
+    jd = _decode_jd_meta(html)
+    if jd is None:
+        return None
+    uid = jd.get("user_id")
+    return str(uid) if uid is not None else None
 
 
 def parse_messages_index_file(source: Source, rel: str) -> list[ChatIndexEntry]:

@@ -61,6 +61,12 @@ def run(params: dict, progress: ProgressReporter) -> dict:
     concurrency = int(params.get("concurrency") or DEFAULT_CONCURRENCY)
     per_host = int(params.get("per_host") or DEFAULT_PER_HOST)
     timeout_s = int(params.get("timeout") or DEFAULT_TIMEOUT)
+    skipped_unsupported = _mark_unsupported_urls(kinds)
+    if skipped_unsupported:
+        progress.log(
+            f"enrich-media: skipping {skipped_unsupported} photo attachment(s) "
+            f"with on-site VK URLs (https://vk.com/...) — needs auth, handle later"
+        )
     rows = _pick_rows(kinds)
     if not rows:
         progress.log(f"enrich-media: nothing to download for kinds={list(kinds)}")
@@ -114,6 +120,32 @@ def run(params: dict, progress: ProgressReporter) -> dict:
 
 
 # ---------- DB selection ----------
+
+
+def _mark_unsupported_urls(kinds: tuple[str, ...]) -> int:
+    """Pre-flight: mark URLs we know we can't fetch with a plain GET.
+
+    `https://vk.com/...` photo URLs are not direct CDN links — they hit
+    the site itself and need auth / redirect handling. Punt for now;
+    a future enrich step will deal with them properly. We persist a
+    `skipped` status so they're visible and easy to re-queue.
+    """
+    if not kinds or "photo" not in kinds:
+        return 0
+    with connection() as conn:
+        cur = conn.execute(
+            """
+            UPDATE attachments
+               SET download_status = ?,
+                   download_attempted_at = CURRENT_TIMESTAMP,
+                   download_error = ?
+             WHERE kind = 'photo'
+               AND url LIKE 'https://vk.com/%'
+               AND download_status != ?
+            """,
+            (STATUS_SKIPPED, "on-site VK URL, needs auth — not handled yet", STATUS_OK),
+        )
+        return cur.rowcount or 0
 
 
 def _pick_rows(kinds: tuple[str, ...]) -> list[sqlite3.Row]:

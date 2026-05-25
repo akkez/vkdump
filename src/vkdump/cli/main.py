@@ -44,7 +44,7 @@ console = Console()
 
 def _run(task_name: str, params: dict) -> None:
     task = get_task(task_name)
-    apply_migrations()
+    # Migrations are auto-applied inside core.orchestrator.execute().
     log_path = configure_logging()
     with Progress(
         TextColumn("[progress.description]{task.description}"),

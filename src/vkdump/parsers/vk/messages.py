@@ -26,14 +26,35 @@ from .sources import Source
 
 from .dates import DateParseError, parse_vk_datetime
 from .models import (
+    KIND_APP_ACTION,
+    KIND_ARTICLE,
+    KIND_ARTIST,
     KIND_AUDIO,
+    KIND_CALL,
+    KIND_CHANNEL_MESSAGE,
+    KIND_COMMUNITY_DONATION,
+    KIND_DELETED_MESSAGE,
     KIND_FILE,
     KIND_FORWARD,
+    KIND_GEO,
+    KIND_GIFT,
+    KIND_LINK,
+    KIND_MARKET_ALBUM,
+    KIND_MARKET_ITEM,
+    KIND_MOMENT,
+    KIND_MONEY_REQUEST,
     KIND_PHOTO,
+    KIND_PHOTO_ALBUM,
+    KIND_PLAYLIST,
+    KIND_PODCAST,
+    KIND_POLL,
+    KIND_STICKER,
+    KIND_STORY,
     KIND_UNKNOWN,
     KIND_VIDEO,
     KIND_WALL_COMMENT,
     KIND_WALL_POST,
+    KIND_WIDGET,
     ParsedAttachment,
     ParsedChatMeta,
     ParsedMessage,
@@ -91,6 +112,9 @@ _ATTACHMENT_LINK_RE = re.compile(
 
 _FORWARD_DESC_RE = re.compile(r"^(\d+)\s+прикреплённ")
 
+# All `<div class="attachment__description">` values we've seen in real
+# dumps. Some texts contain a non-breaking space (U+00A0) — match on the
+# raw key as it appears in HTML rather than normalising.
 _KIND_BY_DESC: dict[str, str] = {
     "Фотография": KIND_PHOTO,
     "Видеозапись": KIND_VIDEO,
@@ -98,6 +122,27 @@ _KIND_BY_DESC: dict[str, str] = {
     "Файл": KIND_FILE,
     "Запись на стене": KIND_WALL_POST,
     "Комментарий на стене": KIND_WALL_COMMENT,
+    "Стикер": KIND_STICKER,
+    "Ссылка": KIND_LINK,
+    "Опрос": KIND_POLL,
+    "История": KIND_STORY,
+    "Подарок": KIND_GIFT,
+    "Карта": KIND_GEO,
+    "Запрос на денежный перевод": KIND_MONEY_REQUEST,
+    "Плейлист": KIND_PLAYLIST,
+    "Статья": KIND_ARTICLE,
+    "Сообщение удалено": KIND_DELETED_MESSAGE,
+    "Музыкант": KIND_ARTIST,
+    "Сообщество с VK Донатом": KIND_COMMUNITY_DONATION,
+    "Товар": KIND_MARKET_ITEM,
+    "Подкаст": KIND_PODCAST,
+    "Звонок": KIND_CALL,
+    "attachment app action": KIND_APP_ACTION,
+    "Виджет": KIND_WIDGET,
+    "Момент": KIND_MOMENT,
+    "Альбом фотографий": KIND_PHOTO_ALBUM,
+    "Подборка товаров": KIND_MARKET_ALBUM,
+    "attachment channel message": KIND_CHANNEL_MESSAGE,
 }
 
 _CRUMB_RE = re.compile(r'<div class="ui_crumb"[^>]*>([^<]+)</div>')
@@ -386,12 +431,16 @@ def _parse_attachments(kludges_html: str) -> list[ParsedAttachment]:
         if not desc_m:
             continue
         desc_raw = unescape(desc_m.group("desc").strip())
+        # Some descriptions embed U+00A0 (NBSP) — normalise to a regular
+        # space for the kind lookup. The raw description is kept as-is
+        # below so we don't lose info if there ever is a meaningful NBSP.
+        desc_key = desc_raw.replace(" ", " ")
         link_m = _ATTACHMENT_LINK_RE.search(att_inner)
         url = link_m.group("url") if link_m else None
-        kind = _KIND_BY_DESC.get(desc_raw)
+        kind = _KIND_BY_DESC.get(desc_key)
         forward_count: int | None = None
         if kind is None:
-            fwd = _FORWARD_DESC_RE.match(desc_raw)
+            fwd = _FORWARD_DESC_RE.match(desc_key)
             if fwd:
                 kind = KIND_FORWARD
                 forward_count = int(fwd.group(1))

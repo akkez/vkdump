@@ -122,7 +122,8 @@ def _run_with_discovery(
             chat_plans.append((chat_rel, chat_name, pages))
             global_total += len(pages)
         progress.log(
-            f"pre-scan: {len(chat_plans)} chat folder(s), {global_total} HTML page(s) total"
+            f"pre-scan: {_plural(len(chat_plans), 'chat folder')}, "
+            f"{_plural(global_total, 'HTML page')} total"
         )
         logger.info(
             "parse_dump: scanning {} chat folder(s), {} pages",
@@ -154,7 +155,7 @@ def _run_with_discovery(
                 for chat_idx, (chat_rel, chat_name, pages) in enumerate(chat_plans, start=1):
                     progress.check_cancelled()
                     progress.log(
-                        f"[{chat_idx}/{len(chat_plans)}] chat: {chat_name} ({len(pages)} page(s))"
+                        f"[{chat_idx}/{len(chat_plans)}] chat: {chat_name} ({_plural(len(pages), 'page')})"
                     )
                     index_entry = indexed_entries.get(chat_name)
                     chat_label = _format_chat_label(chat_name, index_entry)
@@ -514,6 +515,11 @@ def _parse_single_page(
 
 
 # ---------- DB helpers ----------
+
+
+def _plural(count: int, noun: str, plural: str | None = None) -> str:
+    """English count + noun with a regular -s plural (or an override)."""
+    return f"{count} {noun if count == 1 else (plural or noun + 's')}"
 
 
 def _format_chat_label(chat_name: str, index_entry: ChatIndexEntry | None) -> str:

@@ -20,8 +20,9 @@ item never blocks the rest.
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from loguru import logger
 
@@ -62,7 +63,11 @@ def run(params: dict, progress: ProgressReporter) -> dict:
 def _run_with_discovery(
     discovery: Discovery, source_tz: str, progress: ProgressReporter
 ) -> dict:
+    started_at = time.perf_counter()
     progress.log(_format_discovery(discovery))
+    # Fresh runs replace prior parse errors so the table always reflects
+    # *this run's* state. Use `vkdump logs list` after a run to inspect.
+    _truncate_parse_errors()
     source = discovery.source
 
     # ---------- optional: profile (dump owner) ----------
@@ -107,25 +112,61 @@ def _run_with_discovery(
             root_label = discovery.initial_input.name
 
     if discovery.chat_folders:
-        progress.log(f"chat folders: {len(discovery.chat_folders)}")
-        logger.info("parse_dump: scanning {} chat folder(s)", len(discovery.chat_folders))
-        for chat_idx, chat_rel in enumerate(discovery.chat_folders, start=1):
-            progress.check_cancelled()
+        # Pre-scan: list every messagesN.html across every chat folder up
+        # front so the global progress bar reflects the real workload and
+        # doesn't just tick over `len(chat_folders)` (which would be 1/40
+        # while one big chat eats 99% of the time).
+        chat_plans: list[tuple[str, str, list[str]]] = []
+        global_total = 0
+        for chat_rel in discovery.chat_folders:
             chat_name = chat_rel.rsplit("/", 1)[-1] or root_label or "chat"
-            progress.log(f"[{chat_idx}/{len(discovery.chat_folders)}] chat: {chat_name}")
+            pages = list_message_pages(source, chat_rel)
+            chat_plans.append((chat_rel, chat_name, pages))
+            global_total += len(pages)
+        progress.log(
+            f"pre-scan: {len(chat_plans)} chat folder(s), {global_total} HTML page(s) total"
+        )
+        logger.info(
+            "parse_dump: scanning {} chat folder(s), {} pages",
+            len(chat_plans), global_total,
+        )
+
+        global_done = 0
+        progress.report(0, max(global_total, 1), "Starting…")
+
+        for chat_idx, (chat_rel, chat_name, pages) in enumerate(chat_plans, start=1):
+            progress.check_cancelled()
+            progress.log(f"[{chat_idx}/{len(chat_plans)}] chat: {chat_name} ({len(pages)} page(s))")
             index_entry = indexed_entries.get(chat_name)
-            summary = _parse_one_chat(
-                source=source,
-                chat_rel=chat_rel,
-                chat_name=chat_name,
-                progress=progress,
-                source_tz=source_tz,
-                index_entry=index_entry,
+
+            def _on_page_done(_chat_name: str = chat_name) -> None:
+                nonlocal global_done
+                global_done += 1
+                progress.report(
+                    global_done, max(global_total, 1),
+                    f"global: {global_done}/{global_total} pages  (now: {_chat_name})",
+                )
+
+            sub_label = (
+                f"chat: {index_entry.title} ({chat_name})"
+                if index_entry and index_entry.title
+                else f"chat: {chat_name}"
             )
+            with progress.sub(sub_label, total=len(pages)) as chat_progress:
+                summary = _parse_one_chat(
+                    source=source,
+                    chat_rel=chat_rel,
+                    chat_name=chat_name,
+                    pages=pages,
+                    progress=chat_progress,
+                    source_tz=source_tz,
+                    index_entry=index_entry,
+                    on_page_done=_on_page_done,
+                )
             total_messages += summary["parsed_messages"]
             total_errors += summary["errors"]
             chat_summaries.append(summary)
-        progress.report(len(discovery.chat_folders), len(discovery.chat_folders), "Done")
+        progress.report(max(global_total, 1), max(global_total, 1), "Done")
 
     # ---------- single-file mode ----------
     if discovery.single_html_files:
@@ -158,14 +199,75 @@ def _run_with_discovery(
             "messages*.html / index-messages.html / page-info.html file."
         )
 
+    elapsed = time.perf_counter() - started_at
+    aggregates = _aggregate_db_summary()
     return {
         "source": source.describe(),
         "owner_vk_id": owner_vk_id,
-        "chats": len(chat_summaries),
+        "elapsed_seconds": round(elapsed, 2),
+        "chats_parsed_this_run": len(chat_summaries),
         "chats_in_index": len(indexed_entries),
-        "messages": total_messages,
-        "errors": total_errors,
-        "chat_summaries": chat_summaries,
+        "messages_inserted_this_run": total_messages,
+        "errors_this_run": total_errors,
+        "totals": aggregates["totals"],
+        "top_chats": aggregates["top_chats"],
+        "top_senders": aggregates["top_senders"],
+    }
+
+
+def _aggregate_db_summary() -> dict:
+    """Compute a small summary over the current DB state — used as the
+    final result of parse-dump so the CLI doesn't have to dump hundreds of
+    per-chat entries.
+    """
+    with connection() as conn:
+        totals_row = conn.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM chats)          AS chats,
+                (SELECT COUNT(*) FROM users)          AS users,
+                (SELECT COUNT(*) FROM messages)       AS messages,
+                (SELECT COUNT(*) FROM attachments)    AS attachments,
+                (SELECT COUNT(*) FROM parse_errors)   AS parse_errors
+            """
+        ).fetchone()
+        top_chats = [
+            {
+                "title": r["title"] or r["source_folder"],
+                "messages": r["message_count"],
+                "type": r["type"],
+            }
+            for r in conn.execute(
+                """
+                SELECT title, source_folder, message_count, type
+                  FROM chats
+                 WHERE message_count > 0
+                 ORDER BY message_count DESC
+                 LIMIT 10
+                """
+            )
+        ]
+        top_senders = [
+            {
+                "vk_id": r["vk_id"],
+                "display_name": r["display_name"],
+                "messages": r["c"],
+            }
+            for r in conn.execute(
+                """
+                SELECT u.vk_id, u.display_name, COUNT(*) AS c
+                  FROM messages m
+                  JOIN users u ON u.id = m.sender_user_id
+                 GROUP BY u.id
+                 ORDER BY c DESC
+                 LIMIT 10
+                """
+            )
+        ]
+    return {
+        "totals": dict(totals_row),
+        "top_chats": top_chats,
+        "top_senders": top_senders,
     }
 
 
@@ -238,11 +340,12 @@ def _parse_one_chat(
     source: Source,
     chat_rel: str,
     chat_name: str,
+    pages: list[str],
     progress: ProgressReporter,
     source_tz: str,
     index_entry: ChatIndexEntry | None,
+    on_page_done: "Callable[[], None] | None" = None,
 ) -> dict:
-    pages = list_message_pages(source, chat_rel)
     if not pages:
         return {
             "source_folder": chat_name,
@@ -304,6 +407,8 @@ def _parse_one_chat(
             page_idx, page_count,
             f"{chat_name}: page {page_idx}/{page_count} (+{inserted} msgs, {len(parse_errors)} err)",
         )
+        if on_page_done is not None:
+            on_page_done()
 
     _finalize_chat(chat_id=chat_id)
 
@@ -450,6 +555,12 @@ def _upsert_chat(
                 (PROVIDER, meta.source_folder, chat_id),
             )
         return chat_id
+
+
+def _truncate_parse_errors() -> None:
+    with connection() as conn:
+        conn.execute("DELETE FROM parse_errors")
+        conn.execute("UPDATE chats SET error_count = 0")
 
 
 def _bump_chat_progress(chat_id: int, delta_messages: int, delta_errors: int) -> None:

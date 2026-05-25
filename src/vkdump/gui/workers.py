@@ -1,3 +1,6 @@
+from contextlib import contextmanager
+from typing import Iterator
+
 from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
 from ..core.orchestrator import execute
@@ -27,6 +30,13 @@ class GuiProgress:
 
     def log(self, message: str) -> None:
         self._signals.log.emit(message)
+
+    @contextmanager
+    def sub(self, label: str, total: int) -> Iterator["GuiProgress"]:
+        # No dedicated sub-progress widget yet: surface the sub-task as a
+        # log line and reuse the same reporter for inner reports.
+        self.log(f"› {label} (×{total})")
+        yield self
 
 
 class TaskWorker(QRunnable):

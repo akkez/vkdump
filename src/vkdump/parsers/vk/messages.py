@@ -50,11 +50,24 @@ _HEADER_RE = re.compile(
 _BODY_OPEN_RE = re.compile(r"<div>", re.IGNORECASE)
 _ATT_OPEN_RE = re.compile(r'<div class="attachment">')
 
+# Sender link in the header. VK uses three prefixes:
+#   id<N>      → user with id N (positive)
+#   public<N>  → community / page N (peer encoding uses -N)
+#   club<N>    → community N (legacy alias for `public`)
+# Anything else (vanity URL / external link) won't match and the header
+# falls through to the self / unknown branches.
 _HEADER_LINK_RE = re.compile(
-    r'<a href="https://vk\.com/id(?P<vk_id>\d+)"[^>]*>(?P<name>.*?)</a>\s*,\s*(?P<date>.*)',
+    r'<a href="https://vk\.com/(?P<prefix>id|public|club)(?P<num>\d+)"[^>]*>'
+    r"(?P<name>.*?)</a>\s*,\s*(?P<date>.*)",
     re.DOTALL,
 )
 _HEADER_SELF_RE = re.compile(r"^\s*Вы\s*,\s*(?P<date>.*)", re.DOTALL)
+# The date may be followed by trailing markup such as
+# `<span class='message-edited' title='...'> (ред.)</span>`. We slice the
+# date string off at the first `<` we hit so parse_vk_datetime sees a clean
+# token. The edited timestamp is dropped intentionally — we only want the
+# original send time.
+_DATE_TAIL_TRIM_RE = re.compile(r"^([^<]+)")
 
 _KLUDGES_OPEN_RE = re.compile(r'<div class="kludges">')
 _ATTACHMENT_DESC_RE = re.compile(
@@ -250,19 +263,30 @@ def _parse_one_message(
 
 
 def _parse_header(header: str) -> tuple[int | None, str | None, bool, str]:
-    """Return (vk_id, display_name, is_self, raw_date_string)."""
+    """Return (vk_id, display_name, is_self, raw_date_string).
+
+    Communities (`/public<N>` / `/club<N>` links) are represented with a
+    negative vk_id to match VK's peer-id convention.
+    """
     m = _HEADER_LINK_RE.search(header)
     if m:
+        num = int(m.group("num"))
+        vk_id = num if m.group("prefix") == "id" else -num
         return (
-            int(m.group("vk_id")),
+            vk_id,
             unescape(m.group("name").strip()),
             False,
-            m.group("date").strip(),
+            _trim_date(m.group("date")),
         )
     m = _HEADER_SELF_RE.match(header.strip())
     if m:
-        return None, "Вы", True, m.group("date").strip()
+        return None, "Вы", True, _trim_date(m.group("date"))
     raise ValueError(f"unrecognised header layout: {header!r}")
+
+
+def _trim_date(raw: str) -> str:
+    m = _DATE_TAIL_TRIM_RE.match(raw)
+    return (m.group(1) if m else raw).strip()
 
 
 def _split_body(body: str) -> tuple[str, str]:

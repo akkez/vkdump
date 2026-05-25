@@ -1,12 +1,19 @@
+from contextlib import contextmanager
+from typing import Iterator
+
 from rich.progress import Progress, TaskID
-from ..core.progress import Cancelled
+
+from ..core.progress import ProgressReporter
 
 
 class CliProgress:
-    """ProgressReporter implementation backed by rich.progress.Progress.
+    """ProgressReporter backed by rich.progress.Progress.
 
     Cancellation in the CLI happens via Ctrl-C → KeyboardInterrupt, which the
-    orchestrator catches and converts. check_cancelled() stays a no-op here.
+    orchestrator catches and converts; check_cancelled() stays a no-op.
+
+    `sub()` opens a nested rich Progress task (rendered as an extra line
+    below the main bar) and removes it when the scope exits.
     """
 
     def __init__(self, rp: Progress, task_id: TaskID) -> None:
@@ -26,3 +33,31 @@ class CliProgress:
 
     def log(self, message: str) -> None:
         self._rp.console.log(message)
+
+    @contextmanager
+    def sub(self, label: str, total: int) -> Iterator["CliProgress"]:
+        sub_tid = self._rp.add_task(label, total=total if total > 0 else None)
+        try:
+            yield _SubCliProgress(self._rp, sub_tid, parent=self)
+        finally:
+            # Remove the per-sub bar once its scope is done; the parent's
+            # global bar still shows the cumulative progress.
+            self._rp.remove_task(sub_tid)
+
+
+class _SubCliProgress(CliProgress):
+    """Inner progress reporter sharing a Progress instance with its parent.
+
+    log/check_cancelled delegate to the parent so messages flow to the same
+    console and cancellation works at any nesting level.
+    """
+
+    def __init__(self, rp: Progress, task_id: TaskID, parent: CliProgress) -> None:
+        super().__init__(rp, task_id)
+        self._parent = parent
+
+    def check_cancelled(self) -> None:
+        self._parent.check_cancelled()
+
+    def log(self, message: str) -> None:
+        self._parent.log(message)

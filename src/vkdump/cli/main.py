@@ -9,6 +9,7 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 from rich.table import Table
 
 from ..core.db import apply_migrations, connection
+from ..core.logging import configure_logging
 from ..core.orchestrator import execute
 from ..core.progress import Cancelled
 from ..core.runs import list_runs
@@ -44,6 +45,7 @@ console = Console()
 def _run(task_name: str, params: dict) -> None:
     task = get_task(task_name)
     apply_migrations()
+    log_path = configure_logging()
     with Progress(
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
@@ -64,6 +66,7 @@ def _run(task_name: str, params: dict) -> None:
         console.print(f"[green]ok[/green] run #{outcome.run_id}")
         if outcome.result is not None:
             console.print(_render_result(outcome.result))
+        _print_log_banner(log_path, outcome.run_id)
     elif outcome.status == "cancelled":
         console.print(f"[yellow]cancelled[/yellow] run #{outcome.run_id}")
         raise typer.Exit(130)
@@ -81,6 +84,21 @@ def _json_default(value: Any) -> Any:
     if isinstance(value, set):
         return sorted(value)
     return str(value)
+
+
+def _print_log_banner(log_path: Path, run_id: int) -> None:
+    """Tell the user where to find the persisted output of this run."""
+    with connection() as conn:
+        err_count = conn.execute("SELECT COUNT(*) FROM parse_errors").fetchone()[0]
+    parts = [f"[dim]log:[/dim] {log_path}"]
+    if err_count:
+        parts.append(
+            f"[red bold]{err_count}[/red bold] parse errors in DB — "
+            f"[bold]vkdump logs list[/bold] / [bold]vkdump logs show <id>[/bold]"
+        )
+    else:
+        parts.append("[dim]no parse errors[/dim]")
+    console.print(" · ".join(parts))
 
 
 def _render_result(result: Any) -> JSON | str:

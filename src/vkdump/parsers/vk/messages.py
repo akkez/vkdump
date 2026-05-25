@@ -99,10 +99,18 @@ _DATE_TAIL_TRIM_RE = re.compile(r"^([^<]+)")
 _EDITED_SPAN_RE = re.compile(
     r'<span class=[\'"]message-edited[\'"][^>]*title=[\'"](?P<edited_at>[^\'"]+)[\'"]',
 )
-# Cheap shape check — a VK date starts with "<day> <3-letter-month>".
-# Used to keep the plain-text header branch from greedily matching
-# garbage that happens to contain a comma.
-_DATE_LIKE_RE = re.compile(r"^\s*\d{1,2}\s+[A-Za-zА-Яа-я]{3,4}\s+\d{4}\b")
+# Cheap shape check — accepts either of the two date layouts VK emits:
+#   Russian: `<day> <3-letter month> <year>` (e.g. `2 фев 2020`)
+#   English: `at <h>:<m>:<s> am/pm on …`     (e.g. `at 5:54:20 pm on …`)
+# Keeps the plain-text-sender branch from greedily eating any header
+# that happens to contain a comma.
+_DATE_LIKE_RE = re.compile(
+    r"^\s*(?:"
+    r"\d{1,2}\s+[A-Za-zА-Яа-я]{3,4}\s+\d{4}"
+    r"|at\s+\d{1,2}:\d{2}:\d{2}\s+(?:am|pm)\s+on\s+\d{1,2}"
+    r")",
+    re.IGNORECASE,
+)
 
 _KLUDGES_OPEN_RE = re.compile(r'<div class="kludges">')
 _ATTACHMENT_DESC_RE = re.compile(

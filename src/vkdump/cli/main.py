@@ -48,7 +48,7 @@ def _run(task_name: str, params: dict) -> None:
     log_path = configure_logging()
     with Progress(
         TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
+        BarColumn(complete_style="green", finished_style="bright_green"),
         TextColumn("{task.completed}/{task.total}"),
         TimeRemainingColumn(),
         console=console,

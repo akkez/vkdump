@@ -59,7 +59,7 @@ _IMAGE_MAGICS: list[tuple[bytes, str]] = [
 
 
 def run(params: dict, progress: ProgressReporter) -> dict:
-    kinds = tuple(params.get("kinds") or DEFAULT_KINDS)
+    kinds = _coerce_kinds(params.get("kinds"))
     concurrency = int(params.get("concurrency") or DEFAULT_CONCURRENCY)
     per_host = int(params.get("per_host") or DEFAULT_PER_HOST)
     timeout_s = int(params.get("timeout") or DEFAULT_TIMEOUT)
@@ -208,14 +208,26 @@ async def _download_all(
     timeout_s: int,
     progress: ProgressReporter,
 ) -> dict:
-    sem = asyncio.Semaphore(concurrency)
-    # Build an SSL context backed by certifi's CA bundle. Python.framework
-    # on macOS ships with an empty default trust store (the
-    # `Install Certificates.command` post-install step seeds certifi into
-    # it, but it's easy to skip). aiohttp's `ssl=True` reuses
-    # `ssl.create_default_context()` which would then trust nothing and
-    # raise SSLCertVerificationError on every host. Wiring certifi
-    # explicitly removes that whole class of failure.
+    """Worker-pool downloader. We push every row into an asyncio.Queue
+    and spawn `concurrency` workers that drain it. Two reasons not to
+    `create_task` per row up front:
+
+    1. Creating 165k tasks just to have them all stuck on a semaphore is
+       wasteful (each one keeps a coroutine object alive in the loop).
+    2. Cancelling 165k tasks on Ctrl+C produces the "Task was destroyed
+       but it is pending!" lava-flow no matter how carefully we drain —
+       `asyncio.as_completed` keeps an internal queue of futures that
+       isn't reliably cleaned up under cancellation.
+
+    With a fixed worker pool the active task set stays small. Ctrl+C
+    just sets a stop event; workers notice it after they finish (or
+    time out on) their current fetch and exit normally. Second Ctrl+C
+    removes our signal handler so the default Python behaviour (raise
+    KeyboardInterrupt) kicks in — caller turns that into a Cancelled
+    too, but at least it doesn't have to wait for the pool to drain.
+    """
+    # SSL context backed by certifi's bundle — Python.framework on macOS
+    # ships with an empty default trust store, see commit 3d52048.
     ssl_ctx = ssl.create_default_context(cafile=certifi.where())
     connector = aiohttp.TCPConnector(
         limit=concurrency, limit_per_host=per_host, ssl=ssl_ctx,
@@ -227,47 +239,58 @@ async def _download_all(
     total = len(rows)
     done = 0
     bytes_total = 0
-    # Sliding window for the live speed read-out. We push a (timestamp,
-    # cumulative-bytes) sample on every completion and trim entries
-    # older than SPEED_WINDOW_S. Speed = (last_bytes - first_bytes) /
-    # (now - first_timestamp), so idle time decays the displayed speed
-    # towards zero without us having to pump it from a background tick.
     speed_window: deque[tuple[float, int]] = deque()
     SPEED_WINDOW_S = 5.0
     speed_window.append((time.monotonic(), 0))
 
-    # Ctrl+C handling: install a SIGINT handler on the running loop that
-    # just sets an asyncio.Event. We never raise KeyboardInterrupt into
-    # our coroutine, so there's no race between asyncio's runner-level
-    # cleanup and our own draining — the main loop notices the event,
-    # exits the as_completed iteration cleanly, and the finally drains
-    # all in-flight tasks in a normal async context.
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     sigint_installed = False
+
+    def _on_sigint() -> None:
+        stop.set()
+        # Drop our handler so the next Ctrl+C uses Python's default
+        # SIGINT → KeyboardInterrupt path, giving the user a way out
+        # if a fetch is wedged inside aiohttp's read.
+        try:
+            loop.remove_signal_handler(signal.SIGINT)
+        except (NotImplementedError, RuntimeError):
+            pass
+
     try:
-        loop.add_signal_handler(signal.SIGINT, stop.set)
+        loop.add_signal_handler(signal.SIGINT, _on_sigint)
         sigint_installed = True
     except (NotImplementedError, RuntimeError):
-        # Windows / non-main-thread loops fall back to the default
-        # signal handler — cancellation will work via the existing
-        # progress.check_cancelled() path instead.
+        # Windows / non-main-thread loops fall back to the
+        # progress.check_cancelled() path.
         pass
 
+    queue: asyncio.Queue = asyncio.Queue()
+    for row in rows:
+        queue.put_nowait(row)
+
     async with aiohttp.ClientSession(
-        connector=connector, timeout=timeout, headers=headers
+        connector=connector, timeout=timeout, headers=headers,
     ) as session:
 
-        async def _one(row: sqlite3.Row) -> tuple[int, str, dict]:
-            async with sem:
-                return row["id"], row["url"], await _fetch_one(session, row, static_root, timeout_s)
-
-        tasks = [asyncio.create_task(_one(r)) for r in rows]
-        cancelled = False
-        try:
-            for fut in asyncio.as_completed(tasks):
-                att_id, url, result = await fut
-                _persist_result(att_id, url, result)
+        async def _worker() -> None:
+            nonlocal done, bytes_total
+            while not stop.is_set():
+                try:
+                    row = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                try:
+                    result = await _fetch_one(session, row, static_root, timeout_s)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("worker crashed on attachment #{}", row["id"])
+                    result = {
+                        "status": STATUS_FAILED,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                _persist_result(row["id"], row["url"], result)
                 stats[result["status"]] = stats.get(result["status"], 0) + 1
                 done += 1
                 bytes_total += int(result.get("file_size") or 0)
@@ -286,27 +309,25 @@ async def _download_all(
                     f"skipped={stats[STATUS_SKIPPED]}  "
                     f"total {_fmt_bytes(bytes_total)} / {_fmt_bytes(bps)}/s",
                 )
-                if stop.is_set():
-                    cancelled = True
-                    progress.log("enrich-media: Ctrl+C — draining in-flight downloads")
-                    break
                 try:
                     progress.check_cancelled()
                 except Cancelled:
-                    cancelled = True
-                    break
+                    stop.set()
+                    return
+
+        workers = [asyncio.create_task(_worker()) for _ in range(concurrency)]
+        try:
+            await asyncio.gather(*workers, return_exceptions=True)
         finally:
             if sigint_installed:
                 try:
                     loop.remove_signal_handler(signal.SIGINT)
                 except (NotImplementedError, RuntimeError):
                     pass
-            for t in tasks:
-                if not t.done():
-                    t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+
     stats["bytes"] = bytes_total
-    if cancelled:
+    if stop.is_set():
+        progress.log("enrich-media: cancelled — in-flight fetches finished cleanly")
         raise Cancelled()
     return stats
 
@@ -408,6 +429,20 @@ def _persist_result(att_id: int, url: str | None, result: dict) -> None:
 
 
 # ---------- paths / validation ----------
+
+
+def _coerce_kinds(raw) -> tuple[str, ...]:
+    """Accept either a list/tuple of kind slugs or a comma/space-separated
+    string. The GUI hands us the raw QLineEdit text ("photo"), and
+    `tuple("photo")` would otherwise expand to ('p','h','o','t','o').
+    """
+    if raw is None or raw == "":
+        return DEFAULT_KINDS
+    if isinstance(raw, str):
+        parts = [p.strip() for p in raw.replace(";", ",").split(",")]
+        cleaned = tuple(p for p in parts if p)
+        return cleaned or DEFAULT_KINDS
+    return tuple(str(k).strip() for k in raw if str(k).strip()) or DEFAULT_KINDS
 
 
 def _fmt_bytes(n: float) -> str:

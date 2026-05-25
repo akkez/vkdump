@@ -138,13 +138,14 @@ def _run_with_discovery(
             progress.check_cancelled()
             progress.log(f"[{chat_idx}/{len(chat_plans)}] chat: {chat_name} ({len(pages)} page(s))")
             index_entry = indexed_entries.get(chat_name)
+            chat_label = _format_chat_label(chat_name, index_entry)
 
-            def _on_page_done(_chat_name: str = chat_name) -> None:
+            def _on_page_done(_label: str = chat_label) -> None:
                 nonlocal global_done
                 global_done += 1
                 progress.report(
                     global_done, max(global_total, 1),
-                    f"global: {global_done}/{global_total} pages  (now: {_chat_name})",
+                    f"global: {global_done}/{global_total} pages  (now: {_label})",
                 )
 
             sub_label = (
@@ -362,53 +363,64 @@ def _parse_one_chat(
     parsed_messages = 0
     errors = 0
 
-    for page_idx, page_rel in enumerate(pages, start=1):
-        progress.check_cancelled()
-        page_name = page_rel.rsplit("/", 1)[-1]
-        try:
-            html = read_page(source, page_rel)
-            messages, parse_errors = parse_page(html, source_file=page_name)
-        except Exception as exc:
-            # Catastrophic page-level failure (decode error, etc.). Log it
-            # and move on — never let one bad file kill the whole chat.
-            logger.exception("page read failed: {}", page_rel)
-            _insert_parse_errors(
+    # Keep a single sqlite connection open for the entire chat. Profiling
+    # showed connection open/close/commit was ~50% of total wall time when
+    # we opened a fresh conn per page; one conn per chat with explicit
+    # per-page commits roughly halves it while keeping live progress
+    # visible (each page's data lands as soon as the page completes).
+    with connection() as conn:
+        for page_idx, page_rel in enumerate(pages, start=1):
+            progress.check_cancelled()
+            page_name = page_rel.rsplit("/", 1)[-1]
+            try:
+                html = read_page(source, page_rel)
+                messages, parse_errors = parse_page(html, source_file=page_name)
+            except Exception as exc:
+                logger.exception("page read failed: {}", page_rel)
+                _insert_parse_errors_conn(
+                    conn,
+                    chat_id=chat_id,
+                    source_folder=meta.source_folder,
+                    errors=[
+                        ParseError(
+                            source_file=page_name,
+                            raw_html="",
+                            error=f"{type(exc).__name__}: {exc}",
+                            traceback="",
+                        )
+                    ],
+                )
+                errors += 1
+                conn.commit()
+                continue
+
+            inserted = _insert_messages_conn(
+                conn,
                 chat_id=chat_id,
-                source_folder=meta.source_folder,
-                errors=[
-                    ParseError(
-                        source_file=page_name,
-                        raw_html="",
-                        error=f"{type(exc).__name__}: {exc}",
-                        traceback="",
-                    )
-                ],
+                account_id=meta.account_id or "",
+                messages=messages,
             )
-            errors += 1
-            continue
+            if parse_errors:
+                _insert_parse_errors_conn(
+                    conn,
+                    chat_id=chat_id,
+                    source_folder=meta.source_folder,
+                    errors=parse_errors,
+                )
 
-        inserted = _insert_messages(
-            chat_id=chat_id,
-            account_id=meta.account_id or "",
-            messages=messages,
-        )
-        if parse_errors:
-            _insert_parse_errors(
-                chat_id=chat_id,
-                source_folder=meta.source_folder,
-                errors=parse_errors,
+            parsed_messages += inserted
+            errors += len(parse_errors)
+
+            _bump_chat_progress_conn(
+                conn, chat_id, delta_messages=inserted, delta_errors=len(parse_errors)
             )
-
-        parsed_messages += inserted
-        errors += len(parse_errors)
-
-        _bump_chat_progress(chat_id, delta_messages=inserted, delta_errors=len(parse_errors))
-        progress.report(
-            page_idx, page_count,
-            f"{chat_name}: page {page_idx}/{page_count} (+{inserted} msgs, {len(parse_errors)} err)",
-        )
-        if on_page_done is not None:
-            on_page_done()
+            conn.commit()
+            progress.report(
+                page_idx, page_count,
+                f"{chat_name}: page {page_idx}/{page_count} (+{inserted} msgs, {len(parse_errors)} err)",
+            )
+            if on_page_done is not None:
+                on_page_done()
 
     _finalize_chat(chat_id=chat_id)
 
@@ -436,39 +448,44 @@ def _parse_single_page(
     first_html = read_page(source, page_rel)
     meta = parse_chat_meta(first_html, source_folder=chat_name)
     chat_id = _upsert_chat(meta, source_tz=source_tz, index_entry=index_entry)
-    try:
-        messages, parse_errors = parse_page(first_html, source_file=page_name)
-    except Exception as exc:
-        logger.exception("page read failed: {}", page_rel)
-        _insert_parse_errors(
-            chat_id=chat_id,
-            source_folder=meta.source_folder,
-            errors=[
-                ParseError(
-                    source_file=page_name,
-                    raw_html="",
-                    error=f"{type(exc).__name__}: {exc}",
-                    traceback="",
-                )
-            ],
-        )
-        return {
-            "source_folder": meta.source_folder,
-            "title": meta.title,
-            "parsed_messages": 0,
-            "errors": 1,
-        }
+    with connection() as conn:
+        try:
+            messages, parse_errors = parse_page(first_html, source_file=page_name)
+        except Exception as exc:
+            logger.exception("page read failed: {}", page_rel)
+            _insert_parse_errors_conn(
+                conn,
+                chat_id=chat_id,
+                source_folder=meta.source_folder,
+                errors=[
+                    ParseError(
+                        source_file=page_name,
+                        raw_html="",
+                        error=f"{type(exc).__name__}: {exc}",
+                        traceback="",
+                    )
+                ],
+            )
+            return {
+                "source_folder": meta.source_folder,
+                "title": meta.title,
+                "parsed_messages": 0,
+                "errors": 1,
+            }
 
-    inserted = _insert_messages(
-        chat_id=chat_id, account_id=meta.account_id or "", messages=messages
-    )
-    if parse_errors:
-        _insert_parse_errors(
-            chat_id=chat_id,
-            source_folder=meta.source_folder,
-            errors=parse_errors,
+        inserted = _insert_messages_conn(
+            conn, chat_id=chat_id, account_id=meta.account_id or "", messages=messages
         )
-    _bump_chat_progress(chat_id, delta_messages=inserted, delta_errors=len(parse_errors))
+        if parse_errors:
+            _insert_parse_errors_conn(
+                conn,
+                chat_id=chat_id,
+                source_folder=meta.source_folder,
+                errors=parse_errors,
+            )
+        _bump_chat_progress_conn(
+            conn, chat_id, delta_messages=inserted, delta_errors=len(parse_errors)
+        )
     _finalize_chat(chat_id=chat_id)
     return {
         "source_folder": meta.source_folder,
@@ -479,6 +496,26 @@ def _parse_single_page(
 
 
 # ---------- DB helpers ----------
+
+
+def _format_chat_label(chat_name: str, index_entry: ChatIndexEntry | None) -> str:
+    """`<peer_id> <title>`, truncated so it fits on a typical terminal line.
+
+    Title comes from the messages index when we have it (better than the
+    folder name for human-named confs). The peer id stays in front so you
+    can grep the live progress feed for a specific chat.
+    """
+    title = index_entry.title if index_entry and index_entry.title else None
+    if not title or title == chat_name:
+        return chat_name
+    max_total = 60
+    head = f"{chat_name} "
+    remaining = max_total - len(head)
+    if remaining <= 3:
+        return chat_name
+    if len(title) > remaining:
+        title = title[: remaining - 1].rstrip() + "…"
+    return head + title
 
 
 def _peer_id_from_folder(name: str) -> int | None:
@@ -563,23 +600,24 @@ def _truncate_parse_errors() -> None:
         conn.execute("UPDATE chats SET error_count = 0")
 
 
-def _bump_chat_progress(chat_id: int, delta_messages: int, delta_errors: int) -> None:
+def _bump_chat_progress_conn(
+    conn: sqlite3.Connection, chat_id: int, delta_messages: int, delta_errors: int
+) -> None:
     """Live progress for GUI polling: persist per-page deltas to the chat row.
 
     The final values are recomputed authoritatively by :func:`_finalize_chat`.
     """
     if delta_messages == 0 and delta_errors == 0:
         return
-    with connection() as conn:
-        conn.execute(
-            """
-            UPDATE chats
-               SET parsed_message_count = parsed_message_count + ?,
-                   error_count = error_count + ?
-             WHERE id = ?
-            """,
-            (delta_messages, delta_errors, chat_id),
-        )
+    conn.execute(
+        """
+        UPDATE chats
+           SET parsed_message_count = parsed_message_count + ?,
+               error_count = error_count + ?
+         WHERE id = ?
+        """,
+        (delta_messages, delta_errors, chat_id),
+    )
 
 
 def _upsert_user_full(
@@ -624,16 +662,19 @@ def _resolve_sender(
     return _upsert_user_full(conn, vk_id, m.sender_display_name), vk_id
 
 
-def _insert_messages(
-    chat_id: int, account_id: str, messages: Iterable[ParsedMessage]
+def _insert_messages_conn(
+    conn: sqlite3.Connection,
+    chat_id: int,
+    account_id: str,
+    messages: Iterable[ParsedMessage],
 ) -> int:
-    """Insert messages (and their attachments) for one page in a single
-    transaction. Returns the count of *newly inserted* messages.
+    """Insert messages (and their attachments) for one page on the given
+    connection. Caller owns commit / rollback. Returns count of *newly
+    inserted* messages.
     """
     inserted = 0
     account_vk_id: int | None = int(account_id) if account_id.isdigit() else None
-    with connection() as conn:
-        for m in messages:
+    for m in messages:
             user_id, resolved_vk_id = _resolve_sender(conn, m, account_vk_id)
             # Skip storing raw_html when the parser captured every field
             # losslessly — the SQLite row is then a complete representation
@@ -694,10 +735,13 @@ def _insert_messages(
     return inserted
 
 
-def _insert_parse_errors(
-    chat_id: int, source_folder: str, errors: Iterable[ParseError]
+def _insert_parse_errors_conn(
+    conn: sqlite3.Connection,
+    chat_id: int,
+    source_folder: str,
+    errors: Iterable[ParseError],
 ) -> None:
-    with connection() as conn:
+    if True:
         for e in errors:
             conn.execute(
                 """

@@ -9,6 +9,7 @@ dependencies = [
     "rich>=13",
     "pydantic-settings>=2.4",
     "loguru>=0.7",
+    "aiohttp>=3.10",
 ]
 
 [project.scripts]

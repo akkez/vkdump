@@ -133,10 +133,30 @@ def parse_dump_cmd(
     _run("parse-dump", {"source": source, "source_timezone": source_tz})
 
 
-@app.command("enrich")
-def enrich_cmd() -> None:
-    """Enrich stored messages (download media, expand forwards, resolve users)."""
-    _run("enrich", {})
+@app.command("enrich-media")
+def enrich_media_cmd(
+    kinds: Annotated[
+        str,
+        typer.Option("--kinds", help="Comma-separated attachment kinds (default: photo)."),
+    ] = "photo",
+    concurrency: Annotated[
+        int, typer.Option("--concurrency", "-c", help="Total concurrent downloads."),
+    ] = 16,
+    per_host: Annotated[
+        int, typer.Option("--per-host", help="Max in-flight requests per CDN host."),
+    ] = 8,
+    timeout: Annotated[
+        int, typer.Option("--timeout", "-t", help="Per-request total timeout, seconds."),
+    ] = 20,
+) -> None:
+    """Async-download attachment media into data/static/."""
+    kind_list = [k.strip() for k in kinds.split(",") if k.strip()]
+    _run("enrich-media", {
+        "kinds": kind_list,
+        "concurrency": concurrency,
+        "per_host": per_host,
+        "timeout": timeout,
+    })
 
 
 @app.command("stats")

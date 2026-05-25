@@ -75,10 +75,11 @@ _ATT_OPEN_RE = re.compile(r'<div class="attachment">')
 #   id<N>      → user with id N (positive)
 #   public<N>  → community / page N (peer encoding uses -N)
 #   club<N>    → community N (legacy alias for `public`)
+#   event<N>   → event community N (also represented with -N peer id)
 # Anything else (vanity URL / external link) won't match and the header
 # falls through to the self / unknown branches.
 _HEADER_LINK_RE = re.compile(
-    r'<a href="https://vk\.com/(?P<prefix>id|public|club)(?P<num>\d+)"[^>]*>'
+    r'<a href="https://vk\.com/(?P<prefix>id|public|club|event)(?P<num>\d+)"[^>]*>'
     r"(?P<name>.*?)</a>\s*,\s*(?P<date>.*)",
     re.DOTALL,
 )

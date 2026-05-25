@@ -103,7 +103,12 @@ class TaskPanel(QWidget):
         name = self._task_combo.currentData()
         return next(t for t in TASKS if t.name == name)
 
-    def _rebuild_form(self) -> None:
+    def _rebuild_form(self, _index: int = 0) -> None:
+        # `_index` is supplied by `QComboBox.currentIndexChanged(int)` —
+        # accepting it explicitly so PySide6 doesn't silently swallow a
+        # TypeError when invoking the slot, which would leave
+        # `self._editors` populated from the previous task and trigger
+        # a KeyError in `_collect_params` on Run.
         task = self._current_task()
         self._description.setText(task.description)
         self._editors.clear()
@@ -178,6 +183,12 @@ class TaskPanel(QWidget):
 
     def _collect_params(self) -> dict[str, Any]:
         task = self._current_task()
+        # If signal wiring failed to keep the form in sync with the
+        # combo (the historic root cause of the "KeyError: 'kinds'"
+        # bug), rebuild here so Run still works without a restart.
+        expected = {p.name for p in task.params}
+        if expected - self._editors.keys():
+            self._rebuild_form()
         out: dict[str, Any] = {}
         for p in task.params:
             editor = self._editors[p.name]

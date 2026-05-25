@@ -17,6 +17,7 @@ with a content-addressed filename. Mark the row with the result.
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import hashlib
 import os
 import signal
@@ -352,9 +353,13 @@ async def _fetch_one(
             "content_type": None,
         }
 
+    last_modified_ts: float | None = None
+    last_modified_raw: str | None = None
     try:
         async with session.get(url) as resp:
             ct = resp.headers.get("Content-Type")
+            last_modified_raw = resp.headers.get("Last-Modified")
+            last_modified_ts = _parse_http_date(last_modified_raw)
             if resp.status >= 400:
                 return {"status": STATUS_FAILED, "error": f"HTTP {resp.status}", "content_type": ct}
             data = await resp.read()
@@ -389,11 +394,22 @@ async def _fetch_one(
     tmp = abs_path.with_suffix(abs_path.suffix + ".part")
     tmp.write_bytes(data)
     os.replace(tmp, abs_path)
+    # Preserve the server's Last-Modified as the file's mtime so the
+    # local mirror reflects when the photo was actually uploaded to VK,
+    # not when we happened to fetch it. atime tracks our access; only
+    # mtime gets back-dated.
+    if last_modified_ts is not None:
+        try:
+            atime = abs_path.stat().st_atime
+            os.utime(abs_path, (atime, last_modified_ts))
+        except OSError:
+            logger.warning("could not set mtime for {}", abs_path)
     return {
         "status": STATUS_OK,
         "local_path": str(rel),
         "file_size": len(data),
         "content_type": ct,
+        "remote_modified_at": _ts_to_iso(last_modified_ts),
     }
 
 
@@ -414,7 +430,8 @@ def _persist_result(att_id: int, url: str | None, result: dict) -> None:
                    download_error = ?,
                    local_path = COALESCE(?, local_path),
                    file_size = COALESCE(?, file_size),
-                   content_type = COALESCE(?, content_type)
+                   content_type = COALESCE(?, content_type),
+                   remote_modified_at = COALESCE(?, remote_modified_at)
              WHERE id = ?
             """,
             (
@@ -423,12 +440,34 @@ def _persist_result(att_id: int, url: str | None, result: dict) -> None:
                 result.get("local_path"),
                 result.get("file_size"),
                 result.get("content_type"),
+                result.get("remote_modified_at"),
                 att_id,
             ),
         )
 
 
 # ---------- paths / validation ----------
+
+
+def _parse_http_date(raw: str | None) -> float | None:
+    """RFC 7231 IMF-fixdate → unix timestamp. Tolerant of None / garbage."""
+    if not raw:
+        return None
+    try:
+        dt = email.utils.parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if dt is None:
+        return None
+    return dt.timestamp()
+
+
+def _ts_to_iso(ts: float | None) -> str | None:
+    """Unix epoch → 'YYYY-MM-DD HH:MM:SS+00:00' for SQLite TIMESTAMP."""
+    if ts is None:
+        return None
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(sep=" ")
 
 
 def _coerce_kinds(raw) -> tuple[str, ...]:

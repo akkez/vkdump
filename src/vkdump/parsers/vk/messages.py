@@ -83,8 +83,11 @@ _HEADER_LINK_RE = re.compile(
     r"(?P<name>.*?)</a>\s*,\s*(?P<date>.*)",
     re.DOTALL,
 )
-# Self-marker localised: "Вы" (Russian) or "You" (English).
-_HEADER_SELF_RE = re.compile(r"^\s*(?:Вы|You)\s*,\s*(?P<date>.*)", re.DOTALL)
+# Self-marker localised: "Вы" (Russian) or "You" (English). The matched
+# token is kept verbatim so display_name reflects the original locale.
+_HEADER_SELF_RE = re.compile(
+    r"^\s*(?P<self_token>Вы|You)\s*,\s*(?P<date>.*)", re.DOTALL,
+)
 # Plain-text sender (no link), e.g. `Частное сообщество, 29 ноя 2018 …`.
 # Used when VK rendered the sender as bare text — typically deleted users
 # or communities whose page is gone but the message survived. We capture
@@ -425,7 +428,7 @@ def _parse_header(header: str) -> tuple[int | None, str | None, bool, str]:
     stripped = header.strip()
     m = _HEADER_SELF_RE.match(stripped)
     if m:
-        return None, "Вы", True, _trim_date(m.group("date"))
+        return None, m.group("self_token"), True, _trim_date(m.group("date"))
     m = _HEADER_PLAIN_RE.match(stripped)
     if m:
         date_str = _trim_date(m.group("date"))

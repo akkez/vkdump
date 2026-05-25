@@ -62,6 +62,11 @@ _HEADER_LINK_RE = re.compile(
     re.DOTALL,
 )
 _HEADER_SELF_RE = re.compile(r"^\s*Вы\s*,\s*(?P<date>.*)", re.DOTALL)
+# Plain-text sender (no link), e.g. `Частное сообщество, 29 ноя 2018 …`.
+# Used when VK rendered the sender as bare text — typically deleted users
+# or communities whose page is gone but the message survived. We capture
+# the name but can't resolve a vk_id from HTML alone.
+_HEADER_PLAIN_RE = re.compile(r"^\s*(?P<name>[^<>,][^<>,]*?)\s*,\s*(?P<date>.*)", re.DOTALL)
 # The date may be followed by trailing markup such as
 # `<span class='message-edited' title='...'> (ред.)</span>`. We slice the
 # date string off at the first `<` we hit so parse_vk_datetime sees a clean
@@ -71,6 +76,10 @@ _DATE_TAIL_TRIM_RE = re.compile(r"^([^<]+)")
 _EDITED_SPAN_RE = re.compile(
     r'<span class=[\'"]message-edited[\'"][^>]*title=[\'"](?P<edited_at>[^\'"]+)[\'"]',
 )
+# Cheap shape check — a VK date starts with "<day> <3-letter-month>".
+# Used to keep the plain-text header branch from greedily matching
+# garbage that happens to contain a comma.
+_DATE_LIKE_RE = re.compile(r"^\s*\d{1,2}\s+[A-Za-zА-Яа-я]{3,4}\s+\d{4}\b")
 
 _KLUDGES_OPEN_RE = re.compile(r'<div class="kludges">')
 _ATTACHMENT_DESC_RE = re.compile(
@@ -326,9 +335,17 @@ def _parse_header(header: str) -> tuple[int | None, str | None, bool, str]:
             False,
             _trim_date(m.group("date")),
         )
-    m = _HEADER_SELF_RE.match(header.strip())
+    stripped = header.strip()
+    m = _HEADER_SELF_RE.match(stripped)
     if m:
         return None, "Вы", True, _trim_date(m.group("date"))
+    m = _HEADER_PLAIN_RE.match(stripped)
+    if m:
+        date_str = _trim_date(m.group("date"))
+        # Make sure the captured "date" tail actually looks like a date —
+        # otherwise this branch happily eats malformed headers.
+        if _DATE_LIKE_RE.match(date_str):
+            return None, unescape(m.group("name").strip()), False, date_str
     raise ValueError(f"unrecognised header layout: {header!r}")
 
 

@@ -83,7 +83,8 @@ _HEADER_LINK_RE = re.compile(
     r"(?P<name>.*?)</a>\s*,\s*(?P<date>.*)",
     re.DOTALL,
 )
-_HEADER_SELF_RE = re.compile(r"^\s*Вы\s*,\s*(?P<date>.*)", re.DOTALL)
+# Self-marker localised: "Вы" (Russian) or "You" (English).
+_HEADER_SELF_RE = re.compile(r"^\s*(?:Вы|You)\s*,\s*(?P<date>.*)", re.DOTALL)
 # Plain-text sender (no link), e.g. `Частное сообщество, 29 ноя 2018 …`.
 # Used when VK rendered the sender as bare text — typically deleted users
 # or communities whose page is gone but the message survived. We capture
@@ -111,12 +112,16 @@ _ATTACHMENT_LINK_RE = re.compile(
     r'<a class=[\'"]attachment__link[\'"] href=[\'"](?P<url>[^\'"]+)[\'"]'
 )
 
-_FORWARD_DESC_RE = re.compile(r"^(\d+)\s+прикреплённ")
+# Forward attachment description starts with a count, then a locale-
+# specific noun. Russian: "N прикреплённых сообщений" / "1 прикреплённое
+# сообщение". English: "N attached messages" / "1 attached message".
+_FORWARD_DESC_RE = re.compile(r"^(\d+)\s+(?:прикреплённ|attached\s+message)", re.IGNORECASE)
 
 # All `<div class="attachment__description">` values we've seen in real
 # dumps. Some texts contain a non-breaking space (U+00A0) — match on the
 # raw key as it appears in HTML rather than normalising.
 _KIND_BY_DESC: dict[str, str] = {
+    # --- Russian ---
     "Фотография": KIND_PHOTO,
     "Видеозапись": KIND_VIDEO,
     "Аудиозапись": KIND_AUDIO,
@@ -138,11 +143,39 @@ _KIND_BY_DESC: dict[str, str] = {
     "Товар": KIND_MARKET_ITEM,
     "Подкаст": KIND_PODCAST,
     "Звонок": KIND_CALL,
-    "attachment app action": KIND_APP_ACTION,
     "Виджет": KIND_WIDGET,
     "Момент": KIND_MOMENT,
     "Альбом фотографий": KIND_PHOTO_ALBUM,
     "Подборка товаров": KIND_MARKET_ALBUM,
+    # --- English ---
+    "Photo": KIND_PHOTO,
+    "Video": KIND_VIDEO,
+    "Audio": KIND_AUDIO,
+    "File": KIND_FILE,
+    "Wall post": KIND_WALL_POST,
+    "Wall comment": KIND_WALL_COMMENT,
+    "Sticker": KIND_STICKER,
+    "Link": KIND_LINK,
+    "Poll": KIND_POLL,
+    "Story": KIND_STORY,
+    "Gift": KIND_GIFT,
+    "Map": KIND_GEO,
+    "Money transfer request": KIND_MONEY_REQUEST,
+    "Playlist": KIND_PLAYLIST,
+    "Article": KIND_ARTICLE,
+    "Message deleted": KIND_DELETED_MESSAGE,
+    "Artist": KIND_ARTIST,
+    "Community with VK Donut": KIND_COMMUNITY_DONATION,
+    "Product": KIND_MARKET_ITEM,
+    "Podcast": KIND_PODCAST,
+    "Call": KIND_CALL,
+    "Widget": KIND_WIDGET,
+    "Moment": KIND_MOMENT,
+    "Photo album": KIND_PHOTO_ALBUM,
+    "Product collection": KIND_MARKET_ALBUM,
+    # --- locale-independent placeholders the VK exporter emits when it
+    # ran out of human strings for some new attachment types. ---
+    "attachment app action": KIND_APP_ACTION,
     "attachment channel message": KIND_CHANNEL_MESSAGE,
 }
 

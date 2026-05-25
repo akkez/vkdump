@@ -135,6 +135,9 @@ class TaskPanel(QWidget):
         self._errors_timer = QTimer(self)
         self._errors_timer.setInterval(1000)
         self._errors_timer.timeout.connect(self._poll_errors)
+        # SQLite-formatted UTC timestamp captured at Run start so the
+        # poller can ignore failures from previous runs.
+        self._run_started_at: str | None = None
 
         # Stack of sub-progress bars (one per active `sub()` scope), kept
         # in a dedicated container so the layout can grow/shrink as the
@@ -315,6 +318,13 @@ class TaskPanel(QWidget):
         self._progress.setVisible(True)
         self._errors_label.setText("")
         self._errors_label.setVisible(False)
+        # Anchor the per-run window to SQLite's clock (matches the
+        # values stored in parse_errors.created_at /
+        # attachments.download_attempted_at).
+        with connection() as conn:
+            self._run_started_at = conn.execute(
+                "SELECT datetime('now')"
+            ).fetchone()[0]
         self._errors_timer.start()
 
         worker = TaskWorker(task, params)
@@ -400,15 +410,22 @@ class TaskPanel(QWidget):
 
     def _poll_errors(self) -> None:
         """Refresh the live error/failure counter shown by the progress
-        bars. Two COUNT(*) reads, ~1 ms total on a populated DB.
+        bars. Filtered to events that happened during this run, so the
+        label doesn't carry over yesterday's failures.
         """
+        if self._run_started_at is None:
+            return
         try:
             with connection() as conn:
                 parse_n = conn.execute(
-                    "SELECT COUNT(*) FROM parse_errors"
+                    "SELECT COUNT(*) FROM parse_errors WHERE created_at >= ?",
+                    (self._run_started_at,),
                 ).fetchone()[0]
                 download_n = conn.execute(
-                    "SELECT COUNT(*) FROM attachments WHERE download_status = 'failed'"
+                    "SELECT COUNT(*) FROM attachments "
+                    " WHERE download_status = 'failed'"
+                    "   AND download_attempted_at >= ?",
+                    (self._run_started_at,),
                 ).fetchone()[0]
         except Exception:
             return

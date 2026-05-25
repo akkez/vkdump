@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+import unicodedata
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -521,9 +522,18 @@ def _format_chat_label(chat_name: str, index_entry: ChatIndexEntry | None) -> st
     Title comes from the messages index when we have it (better than the
     folder name for human-named confs). The peer id stays in front so you
     can grep the live progress feed for a specific chat.
+
+    Control / format / surrogate / private-use characters are stripped from
+    the title before display — they tend to render as zero width in the
+    terminal while still being counted by Rich's cell-width measurement,
+    which makes the progress bar overflow by exactly one cell and wrap to
+    a new line on every update.
     """
     title = index_entry.title if index_entry and index_entry.title else None
     if not title or title == chat_name:
+        return chat_name
+    title = _strip_invisible(title).strip()
+    if not title:
         return chat_name
     max_total = 60
     head = f"{chat_name} "
@@ -533,6 +543,14 @@ def _format_chat_label(chat_name: str, index_entry: ChatIndexEntry | None) -> st
     if len(title) > remaining:
         title = title[: remaining - 1].rstrip() + "…"
     return head + title
+
+
+def _strip_invisible(s: str) -> str:
+    """Remove unicode categories C* — control, format (ZWJ/ZWNJ/ZWSP/BOM
+    and friends), surrogate, private-use, unassigned. They confuse
+    terminal width measurement.
+    """
+    return "".join(ch for ch in s if not unicodedata.category(ch).startswith("C"))
 
 
 def _peer_id_from_folder(name: str) -> int | None:

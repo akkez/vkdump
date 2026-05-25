@@ -89,16 +89,27 @@ def _json_default(value: Any) -> Any:
 def _print_log_banner(log_path: Path, run_id: int) -> None:
     """Tell the user where to find the persisted output of this run."""
     with connection() as conn:
-        err_count = conn.execute("SELECT COUNT(*) FROM parse_errors").fetchone()[0]
+        parse_errs = conn.execute("SELECT COUNT(*) FROM parse_errors").fetchone()[0]
+        dl_failed = conn.execute(
+            "SELECT COUNT(*) FROM attachments WHERE download_status = 'failed'"
+        ).fetchone()[0]
     console.print(f"[dim]log:[/dim] {log_path}")
-    if err_count:
+    has_issues = False
+    if parse_errs:
+        has_issues = True
         console.print(
             f"[dim]errors log:[/dim] {errors_log_path()}  "
-            f"[red bold]{err_count}[/red bold] parse errors in DB — "
+            f"[red bold]{parse_errs}[/red bold] parse errors in DB — "
             f"[bold]vkdump logs list[/bold] / [bold]vkdump logs show <id>[/bold]"
         )
-    else:
-        console.print("[dim]no parse errors[/dim]")
+    if dl_failed:
+        has_issues = True
+        console.print(
+            f"[red bold]{dl_failed}[/red bold] failed downloads — "
+            f"[bold]vkdump logs downloads[/bold]"
+        )
+    if not has_issues:
+        console.print("[dim]no parse errors, no failed downloads[/dim]")
 
 
 def _render_result(result: Any) -> JSON | str:
@@ -174,6 +185,40 @@ def db_migrate_cmd() -> None:
             console.print(f"applied {name}")
     else:
         console.print("nothing to apply")
+
+
+@logs_app.command("downloads")
+def logs_downloads_cmd(
+    limit: Annotated[int, typer.Option(help="Max rows to show.")] = 20,
+    kind: Annotated[str | None, typer.Option(help="Filter by attachment kind (default: any).")] = None,
+) -> None:
+    """List recent failed attachment downloads."""
+    sql = (
+        "SELECT a.id, a.kind, a.url, a.download_status, a.download_attempted_at, "
+        "       substr(a.download_error, 1, 80) AS err "
+        "  FROM attachments a "
+        " WHERE a.download_status = 'failed' "
+    )
+    args: list = []
+    if kind:
+        sql += " AND a.kind = ? "
+        args.append(kind)
+    sql += " ORDER BY a.download_attempted_at DESC, a.id DESC LIMIT ?"
+    args.append(limit)
+    with connection() as conn:
+        rows = conn.execute(sql, args).fetchall()
+    table = Table(show_header=True, header_style="bold")
+    for col in ("id", "kind", "url", "attempted_at", "error"):
+        table.add_column(col)
+    for r in rows:
+        table.add_row(
+            str(r["id"]),
+            r["kind"] or "",
+            (r["url"] or "")[:60],
+            str(r["download_attempted_at"] or ""),
+            r["err"] or "",
+        )
+    console.print(table)
 
 
 @logs_app.command("list")

@@ -167,15 +167,15 @@ async def _download_all(
         connector=connector, timeout=timeout, headers=headers
     ) as session:
 
-        async def _one(row: sqlite3.Row) -> tuple[int, dict]:
+        async def _one(row: sqlite3.Row) -> tuple[int, str, dict]:
             async with sem:
-                return row["id"], await _fetch_one(session, row, static_root, timeout_s)
+                return row["id"], row["url"], await _fetch_one(session, row, static_root, timeout_s)
 
         tasks = [asyncio.create_task(_one(r)) for r in rows]
         try:
             for fut in asyncio.as_completed(tasks):
-                att_id, result = await fut
-                _persist_result(att_id, result)
+                att_id, url, result = await fut
+                _persist_result(att_id, url, result)
                 stats[result["status"]] = stats.get(result["status"], 0) + 1
                 done += 1
                 progress.report(
@@ -262,7 +262,14 @@ async def _fetch_one(
     }
 
 
-def _persist_result(att_id: int, result: dict) -> None:
+def _persist_result(att_id: int, url: str | None, result: dict) -> None:
+    if result["status"] == STATUS_FAILED:
+        # Mirror to the file logger so the failure shows up in
+        # vkdump.log / vkdump-errors.log on disk, not only in the DB.
+        logger.warning(
+            "download failed for attachment #{} {}: {}",
+            att_id, url or "<no url>", result.get("error") or "?",
+        )
     with connection() as conn:
         conn.execute(
             """

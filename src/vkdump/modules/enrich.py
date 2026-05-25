@@ -90,27 +90,21 @@ def run(params: dict, progress: ProgressReporter) -> dict:
 
     started = time.perf_counter()
     try:
-        with asyncio.Runner() as runner:
-            # Loop-level exception handler swallows the cancellation
-            # noise asyncio's default handler emits on Ctrl+C
-            # ("Task was destroyed but it is pending!", lingering
-            # CancelledError from torn-down aiohttp connections). The
-            # actual cancellation flow is handled by `_download_all`.
-            runner.get_loop().set_exception_handler(_quiet_async_exceptions)
-            stats = runner.run(
-                _download_all(
-                    rows=rows,
-                    static_root=static_root,
-                    concurrency=concurrency,
-                    per_host=per_host,
-                    timeout_s=timeout_s,
-                    progress=progress,
-                )
+        stats = asyncio.run(
+            _download_all(
+                rows=rows,
+                static_root=static_root,
+                concurrency=concurrency,
+                per_host=per_host,
+                timeout_s=timeout_s,
+                progress=progress,
             )
+        )
     except KeyboardInterrupt:
-        # Convert into our `Cancelled` so the orchestrator records the
-        # run as cancelled instead of failed-with-traceback, and the CLI
-        # prints a clean "cancelled" line.
+        # Fallback path. The in-coroutine SIGINT handler in
+        # `_download_all` should normally catch Ctrl+C without raising
+        # KeyboardInterrupt here at all, but on platforms where
+        # `loop.add_signal_handler` isn't supported we may still see one.
         raise Cancelled()
     elapsed = round(time.perf_counter() - started, 2)
     progress.log(

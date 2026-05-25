@@ -194,11 +194,13 @@ def _run_with_discovery(
                     page_count_for_chat = max(len(pages), 1)
                     chat_bar.report(
                         0, page_count_for_chat,
-                        f"[cyan]chat:[/cyan] {chat_label} "
-                        f"({_plural(len(pages), 'page')})",
+                        f"[cyan]chat:[/cyan] {chat_label}  0/{len(pages)} pages",
                     )
 
-                    def _on_page_done(_label: str = chat_label) -> None:
+                    def _on_page_done(
+                        _label: str = chat_label,
+                        _total_pages: int = len(pages),
+                    ) -> None:
                         nonlocal global_done
                         global_done += 1
                         global_bar.report(
@@ -484,10 +486,15 @@ def _parse_one_chat(
                 conn, chat_id, delta_messages=inserted, delta_errors=len(parse_errors)
             )
             conn.commit()
-            # Empty message keeps the chat bar's existing description
-            # (set by the orchestrator to `[cyan]chat:[/cyan] <label>`),
-            # so we don't flicker it with per-page text on each tick.
-            progress.report(page_idx, page_count, "")
+            # Update the label every tick with the live `<done>/<total>`
+            # so the GUI's sub-label tracks progress (the bar widget
+            # itself shows `%v / %m %p%` but the label is the headline
+            # users glance at). Monotonic, not flickery.
+            chat_disp = _format_chat_label(chat_name, index_entry)
+            progress.report(
+                page_idx, page_count,
+                f"[cyan]chat:[/cyan] {chat_disp}  {page_idx}/{page_count} pages",
+            )
             if on_page_done is not None:
                 on_page_done()
 

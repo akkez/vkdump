@@ -19,9 +19,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import signal
 import sqlite3
 import ssl
 import time
+from collections import deque
 from pathlib import Path
 
 import aiohttp
@@ -64,8 +66,7 @@ def run(params: dict, progress: ProgressReporter) -> dict:
     skipped_unsupported = _mark_unsupported_urls(kinds)
     if skipped_unsupported:
         progress.log(
-            f"enrich-media: skipping {skipped_unsupported} photo attachment(s) "
-            f"with on-site VK URLs (https://vk.com/...) — needs auth, handle later"
+            f"enrich-media: skipped {skipped_unsupported} on-site vk.com photo URLs"
         )
     rows = _pick_rows(kinds)
     if not rows:
@@ -89,16 +90,23 @@ def run(params: dict, progress: ProgressReporter) -> dict:
 
     started = time.perf_counter()
     try:
-        stats = asyncio.run(
-            _download_all(
-                rows=rows,
-                static_root=static_root,
-                concurrency=concurrency,
-                per_host=per_host,
-                timeout_s=timeout_s,
-                progress=progress,
+        with asyncio.Runner() as runner:
+            # Loop-level exception handler swallows the cancellation
+            # noise asyncio's default handler emits on Ctrl+C
+            # ("Task was destroyed but it is pending!", lingering
+            # CancelledError from torn-down aiohttp connections). The
+            # actual cancellation flow is handled by `_download_all`.
+            runner.get_loop().set_exception_handler(_quiet_async_exceptions)
+            stats = runner.run(
+                _download_all(
+                    rows=rows,
+                    static_root=static_root,
+                    concurrency=concurrency,
+                    per_host=per_host,
+                    timeout_s=timeout_s,
+                    progress=progress,
+                )
             )
-        )
     except KeyboardInterrupt:
         # Convert into our `Cancelled` so the orchestrator records the
         # run as cancelled instead of failed-with-traceback, and the CLI
@@ -106,8 +114,9 @@ def run(params: dict, progress: ProgressReporter) -> dict:
         raise Cancelled()
     elapsed = round(time.perf_counter() - started, 2)
     progress.log(
-        f"enrich-media: done in {elapsed}s — "
-        f"ok={stats['ok']} failed={stats['failed']} skipped={stats['skipped']}"
+        f"enrich-media: done in {elapsed}s, "
+        f"ok={stats['ok']} failed={stats['failed']} skipped={stats['skipped']}, "
+        f"total {_fmt_bytes(stats.get('bytes', 0))}"
     )
     return {
         "kinds": list(kinds),
@@ -115,6 +124,7 @@ def run(params: dict, progress: ProgressReporter) -> dict:
         "downloaded": stats["ok"],
         "failed": stats["failed"],
         "skipped": stats["skipped"],
+        "bytes_downloaded": stats.get("bytes", 0),
         "elapsed_seconds": elapsed,
     }
 
@@ -123,12 +133,12 @@ def run(params: dict, progress: ProgressReporter) -> dict:
 
 
 def _mark_unsupported_urls(kinds: tuple[str, ...]) -> int:
-    """Pre-flight: mark URLs we know we can't fetch with a plain GET.
+    """Mark on-site vk.com photo URLs as skipped before the fetch loop.
 
-    `https://vk.com/...` photo URLs are not direct CDN links — they hit
-    the site itself and need auth / redirect handling. Punt for now;
-    a future enrich step will deal with them properly. We persist a
-    `skipped` status so they're visible and easy to re-queue.
+    A plain GET against vk.com requires auth and follows redirects we
+    don't handle yet, so trying just produces failed rows. They stay
+    visible via `vkdump logs downloads`; a separate handler can
+    re-queue them later.
     """
     if not kinds or "photo" not in kinds:
         return 0
@@ -143,7 +153,7 @@ def _mark_unsupported_urls(kinds: tuple[str, ...]) -> int:
                AND url LIKE 'https://vk.com/%'
                AND download_status != ?
             """,
-            (STATUS_SKIPPED, "on-site VK URL, needs auth — not handled yet", STATUS_OK),
+            (STATUS_SKIPPED, "on-site vk.com URL", STATUS_OK),
         )
         return cur.rowcount or 0
 
@@ -209,6 +219,33 @@ async def _download_all(
     stats = {STATUS_OK: 0, STATUS_FAILED: 0, STATUS_SKIPPED: 0}
     total = len(rows)
     done = 0
+    bytes_total = 0
+    # Sliding window for the live speed read-out. We push a (timestamp,
+    # cumulative-bytes) sample on every completion and trim entries
+    # older than SPEED_WINDOW_S. Speed = (last_bytes - first_bytes) /
+    # (now - first_timestamp), so idle time decays the displayed speed
+    # towards zero without us having to pump it from a background tick.
+    speed_window: deque[tuple[float, int]] = deque()
+    SPEED_WINDOW_S = 5.0
+    speed_window.append((time.monotonic(), 0))
+
+    # Ctrl+C handling: install a SIGINT handler on the running loop that
+    # just sets an asyncio.Event. We never raise KeyboardInterrupt into
+    # our coroutine, so there's no race between asyncio's runner-level
+    # cleanup and our own draining — the main loop notices the event,
+    # exits the as_completed iteration cleanly, and the finally drains
+    # all in-flight tasks in a normal async context.
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    sigint_installed = False
+    try:
+        loop.add_signal_handler(signal.SIGINT, stop.set)
+        sigint_installed = True
+    except (NotImplementedError, RuntimeError):
+        # Windows / non-main-thread loops fall back to the default
+        # signal handler — cancellation will work via the existing
+        # progress.check_cancelled() path instead.
+        pass
 
     async with aiohttp.ClientSession(
         connector=connector, timeout=timeout, headers=headers
@@ -226,28 +263,42 @@ async def _download_all(
                 _persist_result(att_id, url, result)
                 stats[result["status"]] = stats.get(result["status"], 0) + 1
                 done += 1
+                bytes_total += int(result.get("file_size") or 0)
+                now = time.monotonic()
+                speed_window.append((now, bytes_total))
+                cutoff = now - SPEED_WINDOW_S
+                while len(speed_window) > 1 and speed_window[0][0] < cutoff:
+                    speed_window.popleft()
+                t0, b0 = speed_window[0]
+                dt = max(now - t0, 0.001)
+                bps = (bytes_total - b0) / dt
                 progress.report(
                     done, total,
                     f"enrich-media: {done}/{total}  "
                     f"ok={stats[STATUS_OK]} failed={stats[STATUS_FAILED]} "
-                    f"skipped={stats[STATUS_SKIPPED]}",
+                    f"skipped={stats[STATUS_SKIPPED]}  "
+                    f"total {_fmt_bytes(bytes_total)} / {_fmt_bytes(bps)}/s",
                 )
+                if stop.is_set():
+                    cancelled = True
+                    progress.log("enrich-media: Ctrl+C — draining in-flight downloads")
+                    break
                 try:
                     progress.check_cancelled()
                 except Cancelled:
                     cancelled = True
                     break
-        except (asyncio.CancelledError, KeyboardInterrupt):
-            cancelled = True
         finally:
-            # Cancel any still-running fetches and drain them silently so
-            # we don't leak open sockets or get asyncio's "Task was
-            # destroyed but it is pending" / "Task exception was never
-            # retrieved" noise on stderr.
+            if sigint_installed:
+                try:
+                    loop.remove_signal_handler(signal.SIGINT)
+                except (NotImplementedError, RuntimeError):
+                    pass
             for t in tasks:
                 if not t.done():
                     t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+    stats["bytes"] = bytes_total
     if cancelled:
         raise Cancelled()
     return stats
@@ -350,6 +401,20 @@ def _persist_result(att_id: int, url: str | None, result: dict) -> None:
 
 
 # ---------- paths / validation ----------
+
+
+def _fmt_bytes(n: float) -> str:
+    """Decimal-SI byte formatter: 1000 = 1 KB. Returns short labels like
+    `12.3 MB`. No binary IEC variants on purpose.
+    """
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1000 or unit == "TB":
+            if unit == "B":
+                return f"{int(n)} B"
+            return f"{n:.1f} {unit}"
+        n /= 1000.0
+    return f"{n:.1f} TB"
 
 
 def _static_root() -> Path:

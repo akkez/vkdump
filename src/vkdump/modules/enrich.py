@@ -32,7 +32,7 @@ import certifi
 from loguru import logger
 
 from ..core.db import connection
-from ..core.progress import Cancelled, ProgressReporter
+from ..core.progress import Cancelled, ProgressReporter, Throttle
 
 # A current desktop Chrome string — VK CDN sometimes 403s on python-requests
 # / curl defaults. Real-looking UA is enough; no other headers needed.
@@ -270,6 +270,12 @@ async def _download_all(
     for row in rows:
         queue.put_nowait(row)
 
+    # Shared throttle across all workers (asyncio = single-threaded, so
+    # no lock needed). Skips most per-tick `progress.report` calls when
+    # we're churning through small files, but still emits at least once
+    # every ~250 ms so the bar stays alive.
+    progress_throttle = Throttle()
+
     async with aiohttp.ClientSession(
         connector=connector, timeout=timeout, headers=headers,
     ) as session:
@@ -303,13 +309,14 @@ async def _download_all(
                 t0, b0 = speed_window[0]
                 dt = max(now - t0, 0.001)
                 bps = (bytes_total - b0) / dt
-                progress.report(
-                    done, total,
-                    f"enrich-media: {done}/{total}  "
-                    f"ok={stats[STATUS_OK]} failed={stats[STATUS_FAILED]} "
-                    f"skipped={stats[STATUS_SKIPPED]}  "
-                    f"total {_fmt_bytes(bytes_total)} / {_fmt_bytes(bps)}/s",
-                )
+                if progress_throttle(done, total):
+                    progress.report(
+                        done, total,
+                        f"enrich-media: {done}/{total}  "
+                        f"ok={stats[STATUS_OK]} failed={stats[STATUS_FAILED]} "
+                        f"skipped={stats[STATUS_SKIPPED]}  "
+                        f"total {_fmt_bytes(bytes_total)} / {_fmt_bytes(bps)}/s",
+                    )
                 try:
                     progress.check_cancelled()
                 except Cancelled:

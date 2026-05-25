@@ -28,7 +28,7 @@ from typing import Callable, Iterable
 from loguru import logger
 
 from ..core.db import connection
-from ..core.progress import ProgressReporter
+from ..core.progress import ProgressReporter, Throttle
 from ..parsers.vk import (
     ChatIndexEntry,
     Discovery,
@@ -171,6 +171,9 @@ def _run_with_discovery(
         progress.hide_main()
         global_done = 0
         global_total_or_one = max(global_total, 1)
+        # One global-bar throttle for the whole run; per-chat chat-bar
+        # throttle gets created inside the chat scope below.
+        global_throttle = Throttle()
 
         # Two persistent bars rendered top-down in the terminal:
         #   1. [cyan]  current chat — relabelled per chat, progresses per page;
@@ -205,14 +208,14 @@ def _run_with_discovery(
 
                     def _on_page_done(
                         _label: str = chat_label,
-                        _total_pages: int = len(pages),
                     ) -> None:
                         nonlocal global_done
                         global_done += 1
-                        global_bar.report(
-                            global_done, global_total_or_one,
-                            f"[green]global:[/green] {global_done}/{global_total} pages  (now: {_label})",
-                        )
+                        if global_throttle(global_done, global_total_or_one):
+                            global_bar.report(
+                                global_done, global_total_or_one,
+                                f"[green]global:[/green] {global_done}/{global_total} pages  (now: {_label})",
+                            )
 
                     summary = _parse_one_chat(
                         source=source,
@@ -445,6 +448,7 @@ def _parse_one_chat(
     # we opened a fresh conn per page; one conn per chat with explicit
     # per-page commits roughly halves it while keeping live progress
     # visible (each page's data lands as soon as the page completes).
+    chat_throttle = Throttle()
     with connection() as conn:
         for page_idx, page_rel in enumerate(pages, start=1):
             progress.check_cancelled()
@@ -492,15 +496,16 @@ def _parse_one_chat(
                 conn, chat_id, delta_messages=inserted, delta_errors=len(parse_errors)
             )
             conn.commit()
-            # Update the label every tick with the live `<done>/<total>`
-            # so the GUI's sub-label tracks progress (the bar widget
-            # itself shows `%v / %m %p%` but the label is the headline
-            # users glance at). Monotonic, not flickery.
-            chat_disp = _format_chat_label(chat_name, index_entry)
-            progress.report(
-                page_idx, page_count,
-                f"[cyan]chat:[/cyan] {chat_disp}  {page_idx}/{page_count} pages",
-            )
+            if chat_throttle(page_idx, page_count):
+                # Update the label every tick with the live `<done>/<total>`
+                # so the GUI's sub-label tracks progress (the bar widget
+                # itself shows `%v / %m %p%` but the label is the headline
+                # users glance at). Monotonic, not flickery.
+                chat_disp = _format_chat_label(chat_name, index_entry)
+                progress.report(
+                    page_idx, page_count,
+                    f"[cyan]chat:[/cyan] {chat_disp}  {page_idx}/{page_count} pages",
+                )
             if on_page_done is not None:
                 on_page_done()
 

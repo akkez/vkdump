@@ -65,9 +65,6 @@ def _run_with_discovery(
 ) -> dict:
     started_at = time.perf_counter()
     progress.log(_format_discovery(discovery))
-    # Fresh runs replace prior parse errors so the table always reflects
-    # *this run's* state. Use `vkdump logs list` after a run to inspect.
-    _truncate_parse_errors()
     source = discovery.source
 
     # ---------- optional: profile (dump owner) ----------
@@ -130,6 +127,10 @@ def _run_with_discovery(
             "parse_dump: scanning {} chat folder(s), {} pages",
             len(chat_plans), global_total,
         )
+        # Clear prior parse errors only for chats we're about to re-parse.
+        # Errors from chats outside this run (e.g. from a previous parse of
+        # a different archive) remain inspectable via `vkdump logs list`.
+        _truncate_parse_errors_for([name for _, name, _ in chat_plans])
 
         # We own our own bars; the orchestrator-level "Parse VK dump" row
         # would just be noise above them.
@@ -610,10 +611,28 @@ def _upsert_chat(
         return chat_id
 
 
-def _truncate_parse_errors() -> None:
+def _truncate_parse_errors_for(source_folders: list[str]) -> None:
+    """Wipe parse_errors and reset error_count only for the given chats.
+
+    Errors from chats outside this list (e.g. parsed earlier from a
+    different dump) stay in place, so `vkdump logs list` still shows them.
+    """
+    if not source_folders:
+        return
+    placeholders = ",".join("?" * len(source_folders))
     with connection() as conn:
-        conn.execute("DELETE FROM parse_errors")
-        conn.execute("UPDATE chats SET error_count = 0")
+        conn.execute(
+            f"DELETE FROM parse_errors WHERE source_folder IN ({placeholders})",
+            source_folders,
+        )
+        conn.execute(
+            f"""
+            UPDATE chats
+               SET error_count = 0
+             WHERE source_folder IN ({placeholders})
+            """,
+            source_folders,
+        )
 
 
 def _bump_chat_progress_conn(
@@ -757,16 +776,23 @@ def _insert_parse_errors_conn(
     source_folder: str,
     errors: Iterable[ParseError],
 ) -> None:
-    if True:
-        for e in errors:
-            conn.execute(
-                """
-                INSERT INTO parse_errors
-                    (chat_id, source_folder, source_file, raw_html, error, traceback)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (chat_id, source_folder, e.source_file, e.raw_html, e.error, e.traceback),
-            )
+    for e in errors:
+        # Mirror into the file logger so the failure shows up in
+        # vkdump.log / vkdump-errors.log on disk, not only in the DB.
+        # The DB row carries raw_html + traceback; the log line is the
+        # one-shot summary humans need when tailing.
+        logger.warning(
+            "parse error in {}/{}: {}",
+            source_folder, e.source_file, e.error,
+        )
+        conn.execute(
+            """
+            INSERT INTO parse_errors
+                (chat_id, source_folder, source_file, raw_html, error, traceback)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (chat_id, source_folder, e.source_file, e.raw_html, e.error, e.traceback),
+        )
 
 
 def _finalize_chat(chat_id: int) -> None:

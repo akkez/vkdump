@@ -9,7 +9,7 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 from rich.table import Table
 
 from ..core.db import apply_migrations, connection
-from ..core.logging import configure_logging
+from ..core.logging import configure_logging, errors_log_path
 from ..core.orchestrator import execute
 from ..core.progress import Cancelled
 from ..core.runs import list_runs
@@ -90,15 +90,15 @@ def _print_log_banner(log_path: Path, run_id: int) -> None:
     """Tell the user where to find the persisted output of this run."""
     with connection() as conn:
         err_count = conn.execute("SELECT COUNT(*) FROM parse_errors").fetchone()[0]
-    parts = [f"[dim]log:[/dim] {log_path}"]
+    console.print(f"[dim]log:[/dim] {log_path}")
     if err_count:
-        parts.append(
+        console.print(
+            f"[dim]errors log:[/dim] {errors_log_path()}  "
             f"[red bold]{err_count}[/red bold] parse errors in DB — "
             f"[bold]vkdump logs list[/bold] / [bold]vkdump logs show <id>[/bold]"
         )
     else:
-        parts.append("[dim]no parse errors[/dim]")
-    console.print(" · ".join(parts))
+        console.print("[dim]no parse errors[/dim]")
 
 
 def _render_result(result: Any) -> JSON | str:

@@ -61,8 +61,6 @@ def run(params: dict, progress: ProgressReporter) -> dict:
     concurrency = int(params.get("concurrency") or DEFAULT_CONCURRENCY)
     per_host = int(params.get("per_host") or DEFAULT_PER_HOST)
     timeout_s = int(params.get("timeout") or DEFAULT_TIMEOUT)
-    insecure = bool(params.get("insecure", False))
-
     rows = _pick_rows(kinds)
     if not rows:
         progress.log(f"enrich-media: nothing to download for kinds={list(kinds)}")
@@ -84,16 +82,22 @@ def run(params: dict, progress: ProgressReporter) -> dict:
     static_root.mkdir(parents=True, exist_ok=True)
 
     started = time.perf_counter()
-    stats = asyncio.run(
-        _download_all(
-            rows=rows,
-            static_root=static_root,
-            concurrency=concurrency,
-            per_host=per_host,
-            timeout_s=timeout_s,
-            progress=progress,
+    try:
+        stats = asyncio.run(
+            _download_all(
+                rows=rows,
+                static_root=static_root,
+                concurrency=concurrency,
+                per_host=per_host,
+                timeout_s=timeout_s,
+                progress=progress,
+            )
         )
-    )
+    except KeyboardInterrupt:
+        # Convert into our `Cancelled` so the orchestrator records the
+        # run as cancelled instead of failed-with-traceback, and the CLI
+        # prints a clean "cancelled" line.
+        raise Cancelled()
     elapsed = round(time.perf_counter() - started, 2)
     progress.log(
         f"enrich-media: done in {elapsed}s — "
@@ -183,6 +187,7 @@ async def _download_all(
                 return row["id"], row["url"], await _fetch_one(session, row, static_root, timeout_s)
 
         tasks = [asyncio.create_task(_one(r)) for r in rows]
+        cancelled = False
         try:
             for fut in asyncio.as_completed(tasks):
                 att_id, url, result = await fut
@@ -198,13 +203,21 @@ async def _download_all(
                 try:
                     progress.check_cancelled()
                 except Cancelled:
-                    for t in tasks:
-                        t.cancel()
-                    raise
+                    cancelled = True
+                    break
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            cancelled = True
         finally:
+            # Cancel any still-running fetches and drain them silently so
+            # we don't leak open sockets or get asyncio's "Task was
+            # destroyed but it is pending" / "Task exception was never
+            # retrieved" noise on stderr.
             for t in tasks:
                 if not t.done():
                     t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+    if cancelled:
+        raise Cancelled()
     return stats
 
 

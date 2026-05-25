@@ -635,6 +635,10 @@ def _insert_messages(
     with connection() as conn:
         for m in messages:
             user_id, resolved_vk_id = _resolve_sender(conn, m, account_vk_id)
+            # Skip storing raw_html when the parser captured every field
+            # losslessly — the SQLite row is then a complete representation
+            # on its own and the duplicate HTML would just bloat the store.
+            persisted_raw = None if m.fully_parsed else m.raw_html
             cur = conn.execute(
                 """
                 INSERT OR IGNORE INTO messages (
@@ -642,8 +646,9 @@ def _insert_messages(
                     sender_user_id, sender_vk_id, sender_display_name, sender_is_self,
                     sent_at, text, has_forwards, forwarded_count,
                     is_reply, reply_to_message_id, attachment_count,
+                    is_edited, edited_at,
                     source_file, raw_html
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     PROVIDER,
@@ -661,8 +666,10 @@ def _insert_messages(
                     1 if m.is_reply else 0,
                     m.reply_to_message_id,
                     len(m.attachments),
+                    1 if m.is_edited else 0,
+                    m.edited_at,
                     m.source_file,
-                    m.raw_html,
+                    persisted_raw,
                 ),
             )
             if cur.rowcount == 1 and cur.lastrowid:

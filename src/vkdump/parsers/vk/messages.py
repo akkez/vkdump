@@ -24,7 +24,7 @@ from typing import Iterator
 
 from .sources import Source
 
-from .dates import parse_vk_datetime
+from .dates import DateParseError, parse_vk_datetime
 from .models import (
     KIND_AUDIO,
     KIND_FILE,
@@ -65,9 +65,12 @@ _HEADER_SELF_RE = re.compile(r"^\s*Вы\s*,\s*(?P<date>.*)", re.DOTALL)
 # The date may be followed by trailing markup such as
 # `<span class='message-edited' title='...'> (ред.)</span>`. We slice the
 # date string off at the first `<` we hit so parse_vk_datetime sees a clean
-# token. The edited timestamp is dropped intentionally — we only want the
-# original send time.
+# token. The edited-span itself (title attribute = edit timestamp) is then
+# extracted separately by _EDITED_SPAN_RE.
 _DATE_TAIL_TRIM_RE = re.compile(r"^([^<]+)")
+_EDITED_SPAN_RE = re.compile(
+    r'<span class=[\'"]message-edited[\'"][^>]*title=[\'"](?P<edited_at>[^\'"]+)[\'"]',
+)
 
 _KLUDGES_OPEN_RE = re.compile(r'<div class="kludges">')
 _ATTACHMENT_DESC_RE = re.compile(
@@ -238,11 +241,16 @@ def _parse_one_message(
 
     sender_vk_id, sender_name, sender_is_self, date_str = _parse_header(header)
     sent_at = parse_vk_datetime(date_str)
+    is_edited, edited_at = _parse_edited(header)
 
     text, kludges_html = _split_body(body)
     attachments = _parse_attachments(kludges_html)
     forwarded_count = sum(
         (a.forward_count or 0) for a in attachments if a.kind == KIND_FORWARD
+    )
+    fully_parsed = (
+        all(a.kind != KIND_UNKNOWN for a in attachments)
+        and _kludges_residue_is_empty(kludges_html)
     )
 
     return ParsedMessage(
@@ -257,9 +265,49 @@ def _parse_one_message(
         forwarded_count=forwarded_count,
         is_reply=False,
         reply_to_message_id=None,
+        is_edited=is_edited,
+        edited_at=edited_at,
         raw_html=raw_block,
         source_file=source_file,
+        fully_parsed=fully_parsed,
     )
+
+
+def _parse_edited(header: str) -> tuple[bool, "datetime | None"]:
+    m = _EDITED_SPAN_RE.search(header)
+    if not m:
+        return False, None
+    try:
+        return True, parse_vk_datetime(m.group("edited_at"))
+    except DateParseError:
+        return True, None
+
+
+def _kludges_residue_is_empty(kludges_html: str) -> bool:
+    """Return True iff everything inside the kludges block is captured by
+    `<div class="attachment">...</div>` blocks — i.e. nothing meaningful is
+    left over after stripping the attachments.
+
+    Used to decide whether the message is "fully parsed". If kludges holds
+    a service-message rendering (e.g. `<a class="im_srv_lnk">X</a> создал
+    чат «<b>Y</b>»`) or anything else outside an attachment block, we leave
+    the message marked as not fully parsed so callers can keep raw_html.
+    """
+    if not kludges_html:
+        return True
+    cursor = 0
+    pieces: list[str] = []
+    for m in _ATT_OPEN_RE.finditer(kludges_html):
+        pieces.append(kludges_html[cursor:m.start()])
+        try:
+            close_at = _find_balanced_div_end(kludges_html, m.end())
+        except ValueError:
+            return False
+        cursor = close_at + len("</div>")
+    pieces.append(kludges_html[cursor:])
+    residue = "".join(pieces)
+    # Anything that opens an HTML element ⇒ unparsed content present.
+    return re.search(r"<[A-Za-z]", residue) is None
 
 
 def _parse_header(header: str) -> tuple[int | None, str | None, bool, str]:

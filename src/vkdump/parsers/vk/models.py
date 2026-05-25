@@ -37,8 +37,15 @@ class ParsedMessage:
     forwarded_count: int = 0
     is_reply: bool = False
     reply_to_message_id: int | None = None
+    is_edited: bool = False
+    edited_at: datetime | None = None
     raw_html: str = ""
     source_file: str = ""
+    # True when every meaningful HTML fragment of this message has been
+    # captured into typed fields (no unknown attachments, no leftover markup
+    # in kludges). Callers may drop `raw_html` for these — the parsed row
+    # then represents the message losslessly on its own.
+    fully_parsed: bool = True
 
 
 @dataclass

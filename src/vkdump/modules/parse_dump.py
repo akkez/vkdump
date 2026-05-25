@@ -186,11 +186,17 @@ def _run_with_discovery(
             ) as global_bar:
                 for chat_idx, (chat_rel, chat_name, pages) in enumerate(chat_plans, start=1):
                     progress.check_cancelled()
-                    progress.log(
-                        f"[{chat_idx}/{len(chat_plans)}] chat: {chat_name} ({_plural(len(pages), 'page')})"
-                    )
                     index_entry = indexed_entries.get(chat_name)
                     chat_label = _format_chat_label(chat_name, index_entry)
+                    title_suffix = (
+                        f" — {_strip_invisible(index_entry.title).strip()}"
+                        if index_entry and index_entry.title
+                        else ""
+                    )
+                    progress.log(
+                        f"[{chat_idx}/{len(chat_plans)}] chat: {chat_name}"
+                        f"{title_suffix} ({_plural(len(pages), 'page')})"
+                    )
                     page_count_for_chat = max(len(pages), 1)
                     chat_bar.report(
                         0, page_count_for_chat,

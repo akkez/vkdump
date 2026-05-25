@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -18,10 +19,23 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from rich.text import Text
 
 from ..tasks.registry import TASKS
 from ..tasks.spec import ParamSpec, TaskSpec
 from .workers import TaskWorker
+
+
+def _strip_markup(s: str) -> str:
+    """Drop Rich-style `[green]…[/green]` markup so it doesn't show up
+    raw in Qt widgets. Rich's parser is a more robust stripper than a
+    handrolled regex (handles nested / unmatched tags / escapes)."""
+    if not s or "[" not in s:
+        return s
+    try:
+        return Text.from_markup(s).plain
+    except Exception:
+        return s
 
 
 class TaskPanel(QWidget):
@@ -55,6 +69,14 @@ class TaskPanel(QWidget):
         self._progress.setValue(0)
         self._progress.setFormat("%v / %m  %p%")
 
+        # Stack of sub-progress bars (one per active `sub()` scope), kept
+        # in a dedicated container so the layout can grow/shrink as the
+        # module opens and closes nested scopes.
+        self._sub_host = QFrame()
+        self._sub_layout = QVBoxLayout(self._sub_host)
+        self._sub_layout.setContentsMargins(0, 0, 0, 0)
+        self._sub_bars: dict[int, tuple[QLabel, QProgressBar]] = {}
+
         self._status = QLabel("")
         self._log = QTextEdit()
         self._log.setReadOnly(True)
@@ -71,6 +93,7 @@ class TaskPanel(QWidget):
         layout.addWidget(self._form_host)
         layout.addLayout(btn_row)
         layout.addWidget(self._progress)
+        layout.addWidget(self._sub_host)
         layout.addWidget(self._status)
         layout.addWidget(self._log, 1)
 
@@ -187,12 +210,21 @@ class TaskPanel(QWidget):
         self._progress.setRange(0, 1)
         self._progress.setValue(0)
 
+        # Tear down any leftover sub-bars from a previous run.
+        for sub_id in list(self._sub_bars.keys()):
+            self._remove_sub_bar(sub_id)
+        self._progress.setVisible(True)
+
         worker = TaskWorker(task, params)
         worker.signals.progress.connect(self._on_progress)
-        worker.signals.log.connect(self._log.append)
+        worker.signals.log.connect(self._on_log)
         worker.signals.finished.connect(self._on_finished)
         worker.signals.failed.connect(self._on_failed)
         worker.signals.cancelled.connect(self._on_cancelled)
+        worker.signals.sub_started.connect(self._on_sub_started)
+        worker.signals.sub_progress.connect(self._on_sub_progress)
+        worker.signals.sub_ended.connect(self._on_sub_ended)
+        worker.signals.main_hidden.connect(self._on_main_hidden)
         self._active_worker = worker
 
         self._run_btn.setEnabled(False)
@@ -212,7 +244,48 @@ class TaskPanel(QWidget):
         self._progress.setRange(0, total)
         self._progress.setValue(current)
         if message:
-            self._status.setText(message)
+            self._status.setText(_strip_markup(message))
+
+    def _on_log(self, message: str) -> None:
+        self._log.append(_strip_markup(message))
+
+    def _on_main_hidden(self) -> None:
+        self._progress.setVisible(False)
+
+    def _on_sub_started(self, sub_id: int, label: str, total: int) -> None:
+        lbl = QLabel(_strip_markup(label))
+        bar = QProgressBar()
+        bar.setRange(0, total if total > 0 else 1)
+        bar.setValue(0)
+        bar.setFormat("%v / %m  %p%")
+        self._sub_layout.addWidget(lbl)
+        self._sub_layout.addWidget(bar)
+        self._sub_bars[sub_id] = (lbl, bar)
+
+    def _on_sub_progress(self, sub_id: int, current: int, total: int, message: str) -> None:
+        entry = self._sub_bars.get(sub_id)
+        if entry is None:
+            return
+        lbl, bar = entry
+        if total <= 0:
+            total = max(current, 1)
+        bar.setRange(0, total)
+        bar.setValue(current)
+        if message:
+            lbl.setText(_strip_markup(message))
+
+    def _on_sub_ended(self, sub_id: int) -> None:
+        self._remove_sub_bar(sub_id)
+
+    def _remove_sub_bar(self, sub_id: int) -> None:
+        entry = self._sub_bars.pop(sub_id, None)
+        if entry is None:
+            return
+        lbl, bar = entry
+        self._sub_layout.removeWidget(lbl)
+        self._sub_layout.removeWidget(bar)
+        lbl.deleteLater()
+        bar.deleteLater()
 
     def _reset_buttons(self) -> None:
         self._run_btn.setEnabled(True)

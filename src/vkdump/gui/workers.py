@@ -14,12 +14,20 @@ class WorkerSignals(QObject):
     finished = Signal(int, object)
     failed = Signal(int, str)
     cancelled = Signal(int)
+    # Sub-task progress: a unique id distinguishes nested / concurrent
+    # sub-bars (e.g. the per-chat and the global bars that parse_dump
+    # owns). The panel maintains one QProgressBar per id.
+    sub_started = Signal(int, str, int)   # sub_id, label, total
+    sub_progress = Signal(int, int, int, str)  # sub_id, current, total, message
+    sub_ended = Signal(int)               # sub_id
+    main_hidden = Signal()
 
 
 class GuiProgress:
     def __init__(self, signals: WorkerSignals, token: CancellationToken) -> None:
         self._signals = signals
         self._token = token
+        self._next_sub_id = 0
 
     def report(self, current: int, total: int, message: str = "") -> None:
         self._signals.progress.emit(current, total, message)
@@ -32,16 +40,34 @@ class GuiProgress:
         self._signals.log.emit(message)
 
     @contextmanager
-    def sub(self, label: str, total: int) -> Iterator["GuiProgress"]:
-        # No dedicated sub-progress widget yet: surface the sub-task as a
-        # log line and reuse the same reporter for inner reports.
-        self.log(f"› {label} (×{total})")
-        yield self
+    def sub(self, label: str, total: int) -> Iterator["_SubGuiProgress"]:
+        sub_id = self._next_sub_id
+        self._next_sub_id += 1
+        self._signals.sub_started.emit(sub_id, label, total)
+        sub = _SubGuiProgress(self._signals, self._token, sub_id, parent=self)
+        try:
+            yield sub
+        finally:
+            self._signals.sub_ended.emit(sub_id)
 
     def hide_main(self) -> None:
-        # GUI doesn't render an orchestrator-level bar separately, so
-        # there's nothing to hide.
-        return None
+        self._signals.main_hidden.emit()
+
+
+class _SubGuiProgress(GuiProgress):
+    def __init__(self, signals, token, sub_id, parent: GuiProgress) -> None:
+        super().__init__(signals, token)
+        self._sub_id = sub_id
+        self._parent = parent
+
+    def report(self, current: int, total: int, message: str = "") -> None:
+        self._signals.sub_progress.emit(self._sub_id, current, total, message)
+
+    def log(self, message: str) -> None:
+        self._parent.log(message)
+
+    def check_cancelled(self) -> None:
+        self._parent.check_cancelled()
 
 
 class TaskWorker(QRunnable):

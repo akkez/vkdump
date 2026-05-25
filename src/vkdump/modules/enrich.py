@@ -127,12 +127,12 @@ def run(params: dict, progress: ProgressReporter) -> dict:
 
 
 def _mark_unsupported_urls(kinds: tuple[str, ...]) -> int:
-    """Mark on-site vk.com photo URLs as skipped before the fetch loop.
+    """Re-stamp on-site vk.com photo rows as 'skipped' regardless of
+    their current status (so prior 'failed' attempts from older code
+    don't keep cluttering `vkdump logs downloads`).
 
-    A plain GET against vk.com requires auth and follows redirects we
-    don't handle yet, so trying just produces failed rows. They stay
-    visible via `vkdump logs downloads`; a separate handler can
-    re-queue them later.
+    The actual queue-time exclusion lives in :func:`_pick_rows`; this
+    only normalises the persisted state.
     """
     if not kinds or "photo" not in kinds:
         return 0
@@ -147,7 +147,7 @@ def _mark_unsupported_urls(kinds: tuple[str, ...]) -> int:
                AND url LIKE 'https://vk.com/%'
                AND download_status != ?
             """,
-            (STATUS_SKIPPED, "on-site vk.com URL", STATUS_OK),
+            (STATUS_SKIPPED, "on-site vk.com URL", STATUS_SKIPPED),
         )
         return cur.rowcount or 0
 
@@ -155,8 +155,19 @@ def _mark_unsupported_urls(kinds: tuple[str, ...]) -> int:
 def _pick_rows(kinds: tuple[str, ...]) -> list[sqlite3.Row]:
     """Pick attachments that still need fetching.
 
-    Includes everything in `pending` / `failed`, plus rows marked `ok`
-    whose `local_path` no longer exists on disk — those get rescheduled.
+    Filters at the SQL level by:
+
+    - kind ∈ `kinds`
+    - URL present
+    - URL is **not** `https://vk.com/...` — those are on-site links that
+      need auth / redirect handling, we don't ever want them in the
+      queue regardless of their stored status.
+    - `download_status` is **not** 'skipped' — explicit skips stay out
+      until the user re-queues them by hand.
+
+    Among the remaining rows, those at status='ok' whose `local_path`
+    is still present on disk are dropped in Python; rows whose file
+    vanished get rescheduled.
     """
     if not kinds:
         return []
@@ -170,8 +181,10 @@ def _pick_rows(kinds: tuple[str, ...]) -> list[sqlite3.Row]:
              WHERE kind IN ({placeholders})
                AND url IS NOT NULL
                AND url != ''
+               AND url NOT LIKE 'https://vk.com/%'
+               AND download_status != ?
             """,
-            kinds,
+            (*kinds, STATUS_SKIPPED),
         ).fetchall()
     out: list[sqlite3.Row] = []
     for r in candidates:

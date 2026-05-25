@@ -32,6 +32,13 @@ class ProgressReporter(Protocol):
         """
         ...
 
+    def hide_main(self) -> None:
+        """Suppress the orchestrator-level row when a module owns its own
+        bars via `sub()`. Implementations that don't render a main row
+        may make this a no-op.
+        """
+        ...
+
 
 @contextmanager
 def _self_sub(reporter: "ProgressReporter", label: str, total: int) -> Iterator["ProgressReporter"]:

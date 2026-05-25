@@ -131,43 +131,59 @@ def _run_with_discovery(
             len(chat_plans), global_total,
         )
 
+        # We own our own bars; the orchestrator-level "Parse VK dump" row
+        # would just be noise above them.
+        progress.hide_main()
         global_done = 0
-        progress.report(0, max(global_total, 1), "Starting…")
+        global_total_or_one = max(global_total, 1)
 
-        for chat_idx, (chat_rel, chat_name, pages) in enumerate(chat_plans, start=1):
-            progress.check_cancelled()
-            progress.log(f"[{chat_idx}/{len(chat_plans)}] chat: {chat_name} ({len(pages)} page(s))")
-            index_entry = indexed_entries.get(chat_name)
-            chat_label = _format_chat_label(chat_name, index_entry)
+        # Two persistent bars rendered top-down in the terminal:
+        #   1. [cyan]  current chat — relabelled per chat, progresses per page;
+        #   2. [green] global       — total pages across the whole dump.
+        # Sub-tasks render in the order they're added, so the chat scope is
+        # opened first to land on top.
+        with progress.sub(
+            "[cyan]chat:[/cyan] —", total=max(1, len(chat_plans[0][2]) if chat_plans else 1),
+        ) as chat_bar:
+            with progress.sub(
+                f"[green]global:[/green] 0/{global_total} pages",
+                total=global_total_or_one,
+            ) as global_bar:
+                for chat_idx, (chat_rel, chat_name, pages) in enumerate(chat_plans, start=1):
+                    progress.check_cancelled()
+                    progress.log(
+                        f"[{chat_idx}/{len(chat_plans)}] chat: {chat_name} ({len(pages)} page(s))"
+                    )
+                    index_entry = indexed_entries.get(chat_name)
+                    chat_label = _format_chat_label(chat_name, index_entry)
+                    page_count_for_chat = max(len(pages), 1)
+                    chat_bar.report(0, page_count_for_chat, f"[cyan]chat:[/cyan] {chat_label}")
 
-            def _on_page_done(_label: str = chat_label) -> None:
-                nonlocal global_done
-                global_done += 1
-                progress.report(
-                    global_done, max(global_total, 1),
-                    f"global: {global_done}/{global_total} pages  (now: {_label})",
+                    def _on_page_done(_label: str = chat_label) -> None:
+                        nonlocal global_done
+                        global_done += 1
+                        global_bar.report(
+                            global_done, global_total_or_one,
+                            f"[green]global:[/green] {global_done}/{global_total} pages  (now: {_label})",
+                        )
+
+                    summary = _parse_one_chat(
+                        source=source,
+                        chat_rel=chat_rel,
+                        chat_name=chat_name,
+                        pages=pages,
+                        progress=chat_bar,
+                        source_tz=source_tz,
+                        index_entry=index_entry,
+                        on_page_done=_on_page_done,
+                    )
+                    total_messages += summary["parsed_messages"]
+                    total_errors += summary["errors"]
+                    chat_summaries.append(summary)
+                global_bar.report(
+                    global_total_or_one, global_total_or_one,
+                    f"[green]global:[/green] {global_total}/{global_total} pages — done",
                 )
-
-            sub_label = (
-                f"chat: {index_entry.title} ({chat_name})"
-                if index_entry and index_entry.title
-                else f"chat: {chat_name}"
-            )
-            with progress.sub(sub_label, total=len(pages)) as chat_progress:
-                summary = _parse_one_chat(
-                    source=source,
-                    chat_rel=chat_rel,
-                    chat_name=chat_name,
-                    pages=pages,
-                    progress=chat_progress,
-                    source_tz=source_tz,
-                    index_entry=index_entry,
-                    on_page_done=_on_page_done,
-                )
-            total_messages += summary["parsed_messages"]
-            total_errors += summary["errors"]
-            chat_summaries.append(summary)
-        progress.report(max(global_total, 1), max(global_total, 1), "Done")
 
     # ---------- single-file mode ----------
     if discovery.single_html_files:
@@ -415,10 +431,10 @@ def _parse_one_chat(
                 conn, chat_id, delta_messages=inserted, delta_errors=len(parse_errors)
             )
             conn.commit()
-            progress.report(
-                page_idx, page_count,
-                f"{chat_name}: page {page_idx}/{page_count} (+{inserted} msgs, {len(parse_errors)} err)",
-            )
+            # Empty message keeps the chat bar's existing description
+            # (set by the orchestrator to `[cyan]chat:[/cyan] <label>`),
+            # so we don't flicker it with per-page text on each tick.
+            progress.report(page_idx, page_count, "")
             if on_page_done is not None:
                 on_page_done()
 

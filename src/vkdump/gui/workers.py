@@ -38,6 +38,11 @@ class GuiProgress:
         self.log(f"› {label} (×{total})")
         yield self
 
+    def hide_main(self) -> None:
+        # GUI doesn't render an orchestrator-level bar separately, so
+        # there's nothing to hide.
+        return None
+
 
 class TaskWorker(QRunnable):
     def __init__(self, task: TaskSpec, params: dict) -> None:

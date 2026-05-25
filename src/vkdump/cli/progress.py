@@ -34,6 +34,9 @@ class CliProgress:
     def log(self, message: str) -> None:
         self._rp.console.log(message)
 
+    def hide_main(self) -> None:
+        self._rp.update(self._tid, visible=False)
+
     @contextmanager
     def sub(self, label: str, total: int) -> Iterator["CliProgress"]:
         sub_tid = self._rp.add_task(label, total=total if total > 0 else None)

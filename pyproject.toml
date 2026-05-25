@@ -10,6 +10,7 @@ dependencies = [
     "pydantic-settings>=2.4",
     "loguru>=0.7",
     "aiohttp>=3.10",
+    "certifi>=2026.5.20",
 ]
 
 [project.scripts]

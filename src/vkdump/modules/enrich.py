@@ -20,10 +20,12 @@ import asyncio
 import hashlib
 import os
 import sqlite3
+import ssl
 import time
 from pathlib import Path
 
 import aiohttp
+import certifi
 from loguru import logger
 
 from ..core.db import connection
@@ -59,6 +61,7 @@ def run(params: dict, progress: ProgressReporter) -> dict:
     concurrency = int(params.get("concurrency") or DEFAULT_CONCURRENCY)
     per_host = int(params.get("per_host") or DEFAULT_PER_HOST)
     timeout_s = int(params.get("timeout") or DEFAULT_TIMEOUT)
+    insecure = bool(params.get("insecure", False))
 
     rows = _pick_rows(kinds)
     if not rows:
@@ -153,8 +156,16 @@ async def _download_all(
     progress: ProgressReporter,
 ) -> dict:
     sem = asyncio.Semaphore(concurrency)
+    # Build an SSL context backed by certifi's CA bundle. Python.framework
+    # on macOS ships with an empty default trust store (the
+    # `Install Certificates.command` post-install step seeds certifi into
+    # it, but it's easy to skip). aiohttp's `ssl=True` reuses
+    # `ssl.create_default_context()` which would then trust nothing and
+    # raise SSLCertVerificationError on every host. Wiring certifi
+    # explicitly removes that whole class of failure.
+    ssl_ctx = ssl.create_default_context(cafile=certifi.where())
     connector = aiohttp.TCPConnector(
-        limit=concurrency, limit_per_host=per_host, ssl=True
+        limit=concurrency, limit_per_host=per_host, ssl=ssl_ctx,
     )
     timeout = aiohttp.ClientTimeout(total=timeout_s)
     headers = {"User-Agent": DEFAULT_USER_AGENT, "Accept": "image/*,*/*;q=0.8"}

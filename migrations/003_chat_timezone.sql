@@ -1,0 +1,1 @@
+ALTER TABLE chats ADD COLUMN source_timezone TEXT NOT NULL DEFAULT 'UTC'

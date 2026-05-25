@@ -1,7 +1,8 @@
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, QThreadPool
+from PySide6.QtCore import Qt, QThreadPool, Signal
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -11,8 +12,10 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QStackedWidget,
     QTextEdit,
@@ -21,8 +24,23 @@ from PySide6.QtWidgets import (
 )
 from rich.text import Text
 
+
+class _ClickyLineEdit(QLineEdit):
+    """QLineEdit that fires `clicked_when_empty` on a click when the
+    field is empty. Lets the user tap-to-browse without hunting for a
+    button.
+    """
+
+    clicked_when_empty = Signal()
+
+    def mousePressEvent(self, e) -> None:  # type: ignore[override]
+        super().mousePressEvent(e)
+        if not self.text().strip():
+            self.clicked_when_empty.emit()
+
 from ..tasks.registry import TASKS
 from ..tasks.spec import ParamSpec, TaskSpec
+from .results_dialog import ResultsDialog
 from .workers import TaskWorker
 
 
@@ -60,9 +78,12 @@ class TaskPanel(QWidget):
 
         self._run_btn = QPushButton("Run")
         self._cancel_btn = QPushButton("Cancel")
+        self._results_btn = QPushButton("View results…")
         self._cancel_btn.setEnabled(False)
+        self._results_btn.setEnabled(False)
         self._run_btn.clicked.connect(self._on_run)
         self._cancel_btn.clicked.connect(self._on_cancel)
+        self._results_btn.clicked.connect(self._on_view_results)
 
         self._progress = QProgressBar()
         self._progress.setRange(0, 1)
@@ -84,6 +105,7 @@ class TaskPanel(QWidget):
         btn_row = QHBoxLayout()
         btn_row.addWidget(self._run_btn)
         btn_row.addWidget(self._cancel_btn)
+        btn_row.addWidget(self._results_btn)
         btn_row.addStretch(1)
 
         layout = QVBoxLayout(self)
@@ -129,18 +151,26 @@ class TaskPanel(QWidget):
     def _make_editor(self, p: ParamSpec) -> QWidget:
         if p.type in ("dir", "path", "path_any"):
             row = QWidget()
-            line = QLineEdit()
+            line = _ClickyLineEdit() if p.type == "path_any" else QLineEdit()
             line.setObjectName(f"{p.name}__edit")
             if p.default is not None:
                 line.setText(str(p.default))
             line.setPlaceholderText(p.help or "")
+            line.setMinimumWidth(420)
+            line.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
             layout = QHBoxLayout(row)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.addWidget(line, 1)
 
             def pick_file() -> None:
-                path, _ = QFileDialog.getOpenFileName(self, f"Select {p.label}")
+                # `path_any` is meant for VK dumps — bias the filter
+                # to ZIP archives but keep "All files" reachable.
+                filt = (
+                    "ZIP archive (*.zip);;All files (*)"
+                    if p.type == "path_any" else "All files (*)"
+                )
+                path, _ = QFileDialog.getOpenFileName(self, f"Select {p.label}", "", filt)
                 if path:
                     line.setText(path)
 
@@ -150,20 +180,31 @@ class TaskPanel(QWidget):
                     line.setText(path)
 
             if p.type == "dir":
-                btn = QPushButton("Folder…")
+                btn = QPushButton("Browse…")
                 btn.clicked.connect(pick_dir)
                 layout.addWidget(btn)
             elif p.type == "path":
-                btn = QPushButton("File…")
+                btn = QPushButton("Browse…")
                 btn.clicked.connect(pick_file)
                 layout.addWidget(btn)
-            else:  # path_any
-                file_btn = QPushButton("File…")
-                file_btn.clicked.connect(pick_file)
-                dir_btn = QPushButton("Folder…")
-                dir_btn.clicked.connect(pick_dir)
-                layout.addWidget(file_btn)
-                layout.addWidget(dir_btn)
+            else:  # path_any → one button with a popup menu
+                btn = QPushButton("Browse…")
+                menu = QMenu(btn)
+                file_action = QAction("Pick a ZIP archive…", menu)
+                dir_action = QAction("Pick a folder…", menu)
+                file_action.triggered.connect(pick_file)
+                dir_action.triggered.connect(pick_dir)
+                menu.addAction(file_action)
+                menu.addAction(dir_action)
+                btn.setMenu(menu)
+                layout.addWidget(btn)
+
+                # Click on an empty line → pop the same menu under it so
+                # the user can pick without aiming at the button.
+                if isinstance(line, _ClickyLineEdit):
+                    def _show_menu() -> None:
+                        menu.exec(line.mapToGlobal(line.rect().bottomLeft()))
+                    line.clicked_when_empty.connect(_show_menu)
             return row
         if p.type == "int":
             sb = QSpinBox()
@@ -304,9 +345,16 @@ class TaskPanel(QWidget):
         self._task_combo.setEnabled(True)
         self._active_worker = None
 
+    def _on_view_results(self) -> None:
+        dlg = ResultsDialog(self)
+        dlg.exec()
+
     def _on_finished(self, run_id: int, result: object) -> None:
         self._status.setText(f"ok — run #{run_id}")
-        self._log.append(f"result: {result}")
+        # Skip dumping the raw dict — the user has the Results dialog
+        # for a structured view now. Just acknowledge completion.
+        self._log.append(f"run #{run_id} completed — click View results…")
+        self._results_btn.setEnabled(True)
         self._reset_buttons()
 
     def _on_failed(self, run_id: int, error: str) -> None:

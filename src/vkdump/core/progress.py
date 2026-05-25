@@ -63,7 +63,7 @@ class Throttle:
     barely sees a difference between a 25 Hz and a 250 Hz bar.
     """
 
-    def __init__(self, every_n: int = 10, every_s: float = 0.25) -> None:
+    def __init__(self, every_n: int = 100, every_s: float = 0.25) -> None:
         self._every_n = every_n
         self._every_s = every_s
         self._last_idx = 0

@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, QObject, QRunnable, QThreadPool, Signal, Slot
+from PySide6.QtCore import Qt, QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -70,6 +70,7 @@ class _ClickyLineEdit(QLineEdit):
         if not self.text().strip():
             self.clicked_when_empty.emit()
 
+from ..core.db import connection
 from ..tasks.registry import TASKS
 from ..tasks.spec import ParamSpec, TaskSpec
 from .results_dialog import ResultsDialog
@@ -122,6 +123,19 @@ class TaskPanel(QWidget):
         self._progress.setValue(0)
         self._progress.setFormat("%v / %m  %p%")
 
+        # Live error counter shown next to the progress bars while a
+        # task is running. Hidden when zero. Polled from a QTimer
+        # (cheap — two COUNT(*) queries) so modules don't have to wire
+        # the count through their progress signals.
+        self._errors_label = QLabel("")
+        self._errors_label.setStyleSheet(
+            "color: #d63a3a; font-weight: 600; padding: 2px 0;"
+        )
+        self._errors_label.setVisible(False)
+        self._errors_timer = QTimer(self)
+        self._errors_timer.setInterval(1000)
+        self._errors_timer.timeout.connect(self._poll_errors)
+
         # Stack of sub-progress bars (one per active `sub()` scope), kept
         # in a dedicated container so the layout can grow/shrink as the
         # module opens and closes nested scopes.
@@ -148,6 +162,7 @@ class TaskPanel(QWidget):
         layout.addLayout(btn_row)
         layout.addWidget(self._progress)
         layout.addWidget(self._sub_host)
+        layout.addWidget(self._errors_label)
         layout.addWidget(self._status)
         layout.addWidget(self._log, 1)
 
@@ -298,6 +313,9 @@ class TaskPanel(QWidget):
         for sub_id in list(self._sub_bars.keys()):
             self._remove_sub_bar(sub_id)
         self._progress.setVisible(True)
+        self._errors_label.setText("")
+        self._errors_label.setVisible(False)
+        self._errors_timer.start()
 
         worker = TaskWorker(task, params)
         worker.signals.progress.connect(self._on_progress)
@@ -376,6 +394,35 @@ class TaskPanel(QWidget):
         self._cancel_btn.setEnabled(False)
         self._task_combo.setEnabled(True)
         self._active_worker = None
+        # One last poll so the final counts land before we stop.
+        self._poll_errors()
+        self._errors_timer.stop()
+
+    def _poll_errors(self) -> None:
+        """Refresh the live error/failure counter shown by the progress
+        bars. Two COUNT(*) reads, ~1 ms total on a populated DB.
+        """
+        try:
+            with connection() as conn:
+                parse_n = conn.execute(
+                    "SELECT COUNT(*) FROM parse_errors"
+                ).fetchone()[0]
+                download_n = conn.execute(
+                    "SELECT COUNT(*) FROM attachments WHERE download_status = 'failed'"
+                ).fetchone()[0]
+        except Exception:
+            return
+        chunks: list[str] = []
+        if parse_n:
+            chunks.append(f"{parse_n} parse errors")
+        if download_n:
+            chunks.append(f"{download_n} failed downloads")
+        if chunks:
+            self._errors_label.setText(" · ".join(chunks))
+            self._errors_label.setVisible(True)
+        else:
+            self._errors_label.setVisible(False)
+            self._errors_label.setText("")
 
     def _on_view_results(self) -> None:
         # Heavy SQL rollups run off the GUI thread; the button shows

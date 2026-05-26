@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 SPEC = ROOT / "vkdump-gui.spec"
-BUILD_DIR = ROOT / "build"
+BUILD_DIR = ROOT.parent / "build"
 DIST_DIR = BUILD_DIR / "dist"
 WORK_DIR = BUILD_DIR / "work"
 

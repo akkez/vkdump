@@ -509,10 +509,16 @@ def _static_root() -> Path:
     return Path(__file__).resolve().parents[3] / "data" / "static"
 
 
+_FILENAME_HEX_LEN = 16  # 64 bits of entropy — birthday collision risk is
+                        # vanishingly small at the scale we're at and the
+                        # shorter names keep filesystem listings sane.
+
+
 def _rel_path_for(url: str, kind: str, data: bytes | None = None) -> Path:
     sha = hashlib.sha256(url.encode("utf-8")).hexdigest()
     ext = _ext_from_bytes(data) if data is not None else _ext_from_url(url)
-    return Path(kind) / sha[:2] / f"{sha}{ext}"
+    name = sha[:_FILENAME_HEX_LEN]
+    return Path(kind) / sha[:2] / f"{name}{ext}"
 
 
 def _ext_from_url(url: str) -> str:

@@ -1,4 +1,5 @@
 import sqlite3
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -8,19 +9,37 @@ from loguru import logger
 from .settings import get_settings
 
 
-def _repo_root() -> Path:
+def _frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def app_dir() -> Path:
+    """Writable app directory: next to the executable when frozen, repo root otherwise."""
+    if not _frozen():
+        return Path(__file__).resolve().parents[3]
+    exe = Path(sys.executable).resolve()
+    for parent in exe.parents:
+        if parent.suffix == ".app":
+            return parent.parent
+    return exe.parent
+
+
+def _resource_dir() -> Path:
+    """Read-only bundled resources: sys._MEIPASS when frozen, repo root otherwise."""
+    if _frozen():
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
     return Path(__file__).resolve().parents[3]
 
 
 def resolve_db_path() -> Path:
     p = Path(get_settings().db_path)
     if not p.is_absolute():
-        p = _repo_root() / p
+        p = app_dir() / p
     return p
 
 
 def _migrations_dir() -> Path:
-    return _repo_root() / "migrations"
+    return _resource_dir() / "migrations"
 
 
 @contextmanager

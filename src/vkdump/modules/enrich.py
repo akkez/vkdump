@@ -506,7 +506,8 @@ def _fmt_bytes(n: float) -> str:
 
 
 def _static_root() -> Path:
-    return Path(__file__).resolve().parents[3] / "data" / "static"
+    from ..core.db import app_dir
+    return app_dir() / "data" / "static"
 
 
 _FILENAME_HEX_LEN = 16  # 64 bits of entropy — birthday collision risk is

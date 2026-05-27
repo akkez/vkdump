@@ -120,6 +120,10 @@ class AeroProgressGroup(QWidget):
     """AeroProgressBar with a left status label and a right auto-ETA label."""
 
     _WINDOW_SECONDS = 8.0
+    # Shown until a real total (maximum > minimum) lands. Without this,
+    # the verbose "%v / %m (%p%)" template renders empty or as the
+    # misleading "0 / 0 (0%)" while the bar is idle / pre-progress.
+    _ZERO_FORMAT = "0%"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -144,14 +148,26 @@ class AeroProgressGroup(QWidget):
         root.addWidget(self._bar)
 
         self._samples: deque[tuple[float, int]] = deque()
+        # The format the caller asked for via `setFormat`; applied only
+        # when the bar has a real range to count against.
+        self._verbose_format: str = "%p%"
+        # Caller-supplied maximum. Tracked separately because Qt's
+        # `QProgressBar.text()` returns the empty string when min==max,
+        # so we lie to the underlying bar (safe-range (0,1)) and decide
+        # formatting based on the original ask.
+        self._effective_max: int = 0
+        self._apply_format()
 
     def setRange(self, minimum: int, maximum: int) -> None:
         # `_on_progress` re-emits setRange every tick with the same args
         # for known-total tasks. Resetting unconditionally would wipe the
         # ETA sample window and keep `remaining/rate` at 1-sample forever.
-        if (minimum, maximum) != (self._bar.minimum(), self._bar.maximum()):
+        self._effective_max = maximum
+        safe_max = maximum if maximum > minimum else minimum + 1
+        if (minimum, safe_max) != (self._bar.minimum(), self._bar.maximum()):
             self._reset_eta_state()
-        self._bar.setRange(minimum, maximum)
+        self._bar.setRange(minimum, safe_max)
+        self._apply_format()
 
     def setValue(self, value: int) -> None:
         now = time.monotonic()
@@ -167,7 +183,10 @@ class AeroProgressGroup(QWidget):
         self._recompute_eta()
 
     def setFormat(self, fmt: str) -> None:
-        self._bar.setFormat(fmt)
+        # Remember what the caller wants used once a real total exists;
+        # the actual `_bar` format is chosen by `_apply_format`.
+        self._verbose_format = fmt
+        self._apply_format()
 
     def setStatus(self, text: str) -> None:
         self._status.setText(text)
@@ -177,6 +196,14 @@ class AeroProgressGroup(QWidget):
         self._status.setText("")
         self._reset_eta_state()
         self._bar.setValue(self._bar.minimum())
+        self._apply_format()
+
+    def _apply_format(self) -> None:
+        """Pick verbose vs. flat "0%" based on whether the range is real."""
+        if self._effective_max > self._bar.minimum():
+            self._bar.setFormat(self._verbose_format)
+        else:
+            self._bar.setFormat(self._ZERO_FORMAT)
 
     def _reset_eta_state(self) -> None:
         self._samples.clear()

@@ -8,7 +8,7 @@ from .task_panel import TaskPanel
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("vkdump")
+        self.setWindowTitle("VKdump")
         self.resize(900, 640)
 
         # One tab per registered task, with `stats` rendered as the

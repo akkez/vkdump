@@ -89,7 +89,9 @@ class TaskPanel(QWidget):
         self._cancel_btn.clicked.connect(self._on_cancel)
 
         self._progress = AeroProgressGroup()
-        self._progress.setRange(0, 1)
+        # Start with a degenerate range — the group falls back to a flat
+        # "0%" until a real total arrives via `_on_progress`.
+        self._progress.setRange(0, 0)
         self._progress.setValue(0)
         self._progress.setFormat("%v / %m (%p%)")
         self._progress.setVisible(False)
@@ -302,7 +304,9 @@ class TaskPanel(QWidget):
         self._log.clear()
         self._status.setText("running…")
         self._progress.reset()
-        self._progress.setRange(0, 1)
+        # See __init__: degenerate range == "0%" placeholder until the
+        # module reports a real total.
+        self._progress.setRange(0, 0)
         self._progress.setValue(0)
 
         # Tear down any leftover sub-bars from a previous run.
@@ -344,9 +348,11 @@ class TaskPanel(QWidget):
             self._cancel_btn.setEnabled(False)
 
     def _on_progress(self, current: int, total: int, message: str) -> None:
-        if total <= 0:
-            total = max(current, 1)
-        self._progress.setRange(0, total)
+        # `total <= 0` means the module doesn't know the size yet — keep
+        # the bar in its "0%" placeholder state instead of inventing a
+        # bogus total (the old behaviour would jam the bar to 100% by
+        # setting max == current).
+        self._progress.setRange(0, max(total, 0))
         self._progress.setValue(current)
         if message:
             self._progress.setStatus(_strip_markup(message))
@@ -359,7 +365,7 @@ class TaskPanel(QWidget):
 
     def _on_sub_started(self, sub_id: int, label: str, total: int) -> None:
         group = AeroProgressGroup()
-        group.setRange(0, total if total > 0 else 1)
+        group.setRange(0, max(total, 0))
         group.setValue(0)
         group.setFormat("%v / %m (%p%)")
         group.setStatus(_strip_markup(label))
@@ -370,9 +376,7 @@ class TaskPanel(QWidget):
         group = self._sub_bars.get(sub_id)
         if group is None:
             return
-        if total <= 0:
-            total = max(current, 1)
-        group.setRange(0, total)
+        group.setRange(0, max(total, 0))
         group.setValue(current)
         if message:
             group.setStatus(_strip_markup(message))

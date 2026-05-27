@@ -162,11 +162,12 @@ def enrich_media_cmd(
         typer.Option(
             "--strategy",
             help=(
-                "Ordering: default | groups-first | dms-first | my-uploads-first. "
-                "Affects what gets fetched first, not the final set."
+                "Ordering: newest-first | oldest-first | groups-first | "
+                "dms-first | my-uploads-first. Default newest-first. Affects "
+                "what gets fetched first, not the final set."
             ),
         ),
-    ] = "default",
+    ] = "newest-first",
     concurrency: Annotated[
         int, typer.Option("--concurrency", "-c", help="Total concurrent downloads."),
     ] = 16,

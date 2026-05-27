@@ -74,9 +74,10 @@ TASKS: list[TaskSpec] = [
                 label="Strategy",
                 help="Ordering — every queued attachment still gets downloaded eventually, this just controls what goes first.",
                 required=False,
-                default="default",
+                default="newest-first",
                 choices=[
-                    ("default", "Default (DB order)"),
+                    ("newest-first", "Newest first"),
+                    ("oldest-first", "Oldest first"),
                     ("groups-first", "Group chats first"),
                     ("dms-first", "DMs first"),
                     ("my-uploads-first", "My uploads first"),

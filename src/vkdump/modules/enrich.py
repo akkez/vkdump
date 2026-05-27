@@ -59,7 +59,14 @@ _IMAGE_MAGICS: list[tuple[bytes, str]] = [
 ]
 
 
-VALID_STRATEGIES = ("default", "groups-first", "dms-first", "my-uploads-first")
+VALID_STRATEGIES = (
+    "newest-first",
+    "oldest-first",
+    "groups-first",
+    "dms-first",
+    "my-uploads-first",
+)
+DEFAULT_STRATEGY = "newest-first"
 
 
 def run(params: dict, progress: ProgressReporter) -> dict:
@@ -72,32 +79,37 @@ def run(params: dict, progress: ProgressReporter) -> dict:
         chat_scope = None
     else:
         chat_scope = str(chat_scope).strip() or None
-    strategy = (params.get("strategy") or "default").strip()
+    strategy = (params.get("strategy") or DEFAULT_STRATEGY).strip()
     if strategy not in VALID_STRATEGIES:
         progress.log(
-            f"enrich-media: unknown strategy {strategy!r}, falling back to 'default'"
+            f"enrich-media: unknown strategy {strategy!r}, falling back to {DEFAULT_STRATEGY!r}"
         )
-        strategy = "default"
+        strategy = DEFAULT_STRATEGY
     skipped_unsupported = _mark_unsupported_urls(kinds)
     if skipped_unsupported:
         progress.log(
             f"enrich-media: skipped {skipped_unsupported} on-site vk.com photo URLs"
         )
-    rows = _pick_rows(kinds, chat_scope=chat_scope, strategy=strategy)
+    rows, resolved = _pick_rows(kinds, chat_scope=chat_scope, strategy=strategy)
     if not rows:
-        progress.log(f"enrich-media: nothing to download for kinds={list(kinds)}")
+        progress.log(
+            f"enrich-media: nothing to download for kinds={list(kinds)} "
+            f"(already resolved: {resolved})"
+        )
         return {
             "kinds": list(kinds),
             "selected": 0,
+            "already_resolved": resolved,
             "downloaded": 0,
             "failed": 0,
             "skipped": 0,
         }
 
     scope_note = f" chat_scope={chat_scope}" if chat_scope else ""
-    strat_note = f" strategy={strategy}" if strategy != "default" else ""
+    strat_note = f" strategy={strategy}" if strategy != DEFAULT_STRATEGY else ""
     progress.log(
-        f"enrich-media: {len(rows)} attachment(s) to fetch "
+        f"enrich-media: {len(rows)} attachment(s) to fetch, "
+        f"{resolved} already resolved "
         f"(kinds={list(kinds)}, concurrency={concurrency}, per_host={per_host}, "
         f"timeout={timeout_s}s{scope_note}{strat_note})"
     )
@@ -115,6 +127,7 @@ def run(params: dict, progress: ProgressReporter) -> dict:
                 per_host=per_host,
                 timeout_s=timeout_s,
                 progress=progress,
+                done_offset=resolved,
             )
         )
     except KeyboardInterrupt:
@@ -132,6 +145,7 @@ def run(params: dict, progress: ProgressReporter) -> dict:
     return {
         "kinds": list(kinds),
         "selected": len(rows),
+        "already_resolved": resolved,
         "downloaded": stats["ok"],
         "failed": stats["failed"],
         "skipped": stats["skipped"],
@@ -172,8 +186,8 @@ def _mark_unsupported_urls(kinds: tuple[str, ...]) -> int:
 def _pick_rows(
     kinds: tuple[str, ...],
     chat_scope: str | None = None,
-    strategy: str = "default",
-) -> list[sqlite3.Row]:
+    strategy: str = DEFAULT_STRATEGY,
+) -> tuple[list[sqlite3.Row], int]:
     """Pick attachments that still need fetching.
 
     Filters at the SQL level by:
@@ -189,69 +203,83 @@ def _pick_rows(
       whose chat has that `peer_id`.
 
     `strategy` controls ordering only — every queued attachment still
-    gets downloaded eventually:
+    gets downloaded eventually. The tiebreaker for the chat-type and
+    my-uploads strategies is `m.id DESC` (newest first):
 
-    - "default":         DB order (rowid).
-    - "groups-first":    `chats.type = 'group_chat'` first.
-    - "dms-first":       `chats.type = 'dm'` first.
+    - "newest-first":     `messages.id DESC` — the default.
+    - "oldest-first":     `messages.id ASC`.
+    - "groups-first":     `chats.type = 'group_chat'` first.
+    - "dms-first":        `chats.type = 'dm'` first.
     - "my-uploads-first": `messages.sender_is_self = 1` first.
 
     Among the remaining rows, those at status='ok' whose `local_path`
     is still present on disk are dropped in Python; rows whose file
     vanished get rescheduled.
+
+    Returns `(rows_to_do, resolved_count)`. `resolved_count` is the
+    number of in-scope attachments that the SQL filter already
+    excluded as either status='skipped' or status='ok' with a file on
+    disk — caller uses it to seed the progress bar so a resumed run
+    starts at the right percent instead of "1 / <remaining>".
     """
     if not kinds:
-        return []
+        return [], 0
     placeholders = ",".join("?" * len(kinds))
     static_root = _static_root()
 
-    needs_join = chat_scope is not None or strategy != "default"
-    args: list = []
-    if needs_join:
-        sql = f"""
-        SELECT a.id, a.kind, a.url, a.local_path, a.download_status
-          FROM attachments a
-          JOIN messages m ON m.id = a.message_id
-          JOIN chats c    ON c.id = m.chat_id
-         WHERE a.kind IN ({placeholders})
-           AND a.url IS NOT NULL
-           AND a.url != ''
-           AND a.url NOT LIKE 'https://vk.com/%'
-           AND a.download_status != ?
-        """
-        args.extend([*kinds, STATUS_SKIPPED])
-        if chat_scope is not None:
-            sql += " AND c.peer_id = ?"
-            args.append(chat_scope)
-        if strategy == "groups-first":
-            sql += " ORDER BY (c.type = 'group_chat') DESC, a.id"
-        elif strategy == "dms-first":
-            sql += " ORDER BY (c.type = 'dm') DESC, a.id"
-        elif strategy == "my-uploads-first":
-            sql += " ORDER BY m.sender_is_self DESC, a.id"
-    else:
-        sql = f"""
-        SELECT id, kind, url, local_path, download_status
-          FROM attachments
-         WHERE kind IN ({placeholders})
-           AND url IS NOT NULL
-           AND url != ''
-           AND url NOT LIKE 'https://vk.com/%'
-           AND download_status != ?
-        """
-        args.extend([*kinds, STATUS_SKIPPED])
+    needs_chats = chat_scope is not None or strategy in ("groups-first", "dms-first")
+    chat_join = " JOIN chats c ON c.id = m.chat_id" if needs_chats else ""
+    scope_clause = " AND c.peer_id = ?" if chat_scope is not None else ""
+
+    # messages always joined now — every strategy orders by m.id, either
+    # directly (newest/oldest-first) or as the within-tier tiebreaker.
+    # `skipped` rows are pulled too (so they can be counted toward
+    # `resolved`) and partitioned out in Python below.
+    sql = f"""
+    SELECT a.id, a.kind, a.url, a.local_path, a.download_status
+      FROM attachments a
+      JOIN messages m ON m.id = a.message_id
+      {chat_join}
+     WHERE a.kind IN ({placeholders})
+       AND a.url IS NOT NULL
+       AND a.url != ''
+       AND a.url NOT LIKE 'https://vk.com/%'
+       {scope_clause}
+    """
+    args: list = [*kinds]
+    if chat_scope is not None:
+        args.append(chat_scope)
+
+    if strategy == "newest-first":
+        sql += " ORDER BY m.id DESC, a.id DESC"
+    elif strategy == "oldest-first":
+        sql += " ORDER BY m.id ASC, a.id ASC"
+    elif strategy == "groups-first":
+        sql += " ORDER BY (c.type = 'group_chat') DESC, m.id DESC, a.id DESC"
+    elif strategy == "dms-first":
+        sql += " ORDER BY (c.type = 'dm') DESC, m.id DESC, a.id DESC"
+    elif strategy == "my-uploads-first":
+        sql += " ORDER BY m.sender_is_self DESC, m.id DESC, a.id DESC"
 
     with connection() as conn:
         candidates = conn.execute(sql, args).fetchall()
     out: list[sqlite3.Row] = []
+    resolved = 0
     for r in candidates:
-        if r["download_status"] == STATUS_OK:
+        status = r["download_status"]
+        if status == STATUS_SKIPPED:
+            # Permanent skip (e.g. on-site vk.com URL); never retried,
+            # but counts toward the denominator.
+            resolved += 1
+            continue
+        if status == STATUS_OK:
             local = r["local_path"]
             if local and (static_root / local).is_file():
+                resolved += 1
                 continue
             # File vanished — retry.
         out.append(r)
-    return out
+    return out, resolved
 
 
 # ---------- async core ----------
@@ -264,6 +292,7 @@ async def _download_all(
     per_host: int,
     timeout_s: int,
     progress: ProgressReporter,
+    done_offset: int = 0,
 ) -> dict:
     """Worker-pool downloader. We push every row into an asyncio.Queue
     and spawn `concurrency` workers that drain it. Two reasons not to
@@ -293,8 +322,11 @@ async def _download_all(
     headers = {"User-Agent": DEFAULT_USER_AGENT, "Accept": "image/*,*/*;q=0.8"}
 
     stats = {STATUS_OK: 0, STATUS_FAILED: 0, STATUS_SKIPPED: 0}
-    total = len(rows)
-    done = 0
+    # `done`/`total` are the bar-facing counters: they include the
+    # rows that were already-resolved before this run started (`done_offset`),
+    # so a resumed run picks up at 10001/30000 instead of 1/20000.
+    total = len(rows) + done_offset
+    done = done_offset
     bytes_total = 0
     speed_window: deque[tuple[float, int]] = deque()
     SPEED_WINDOW_S = 5.0

@@ -238,9 +238,11 @@ _ATT_COLS: list[tuple[str, str]] = [
 
 
 class StatsView(QWidget):
-    """Tabbed read-only summary. Builds instantly with empty tabs, then
-    fills them as background rollups complete. Embeddable inline (e.g.
-    as a main-window tab) or wrappable in a dialog via `ResultsDialog`.
+    """Tabbed read-only summary. Builds instantly with empty tabs; the
+    SQL rollups don't kick off until `ensure_started()` is called, so
+    parking this widget behind a tab the user might never open costs
+    nothing. Embeddable inline (main-window tab) or popup-wrapped via
+    `ResultsDialog`.
     """
 
     def __init__(self, parent: QWidget | None = None, min_messages: int = 10) -> None:
@@ -252,6 +254,7 @@ class StatsView(QWidget):
         # `_RollupSignals` QObject) before `run()` reaches `emit`,
         # producing "Signal source has been deleted".
         self._runnables: list[_Rollup] = []
+        self._started = False
 
         self._tabs = QTabWidget()
         self._chats_tab = _Tab(_CHAT_COLS)
@@ -265,6 +268,11 @@ class StatsView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._tabs)
 
+    def ensure_started(self) -> None:
+        """Kick the SQL rollups on first call; subsequent calls no-op."""
+        if self._started:
+            return
+        self._started = True
         self._start_loaders()
 
     def _start_loaders(self) -> None:
@@ -325,14 +333,17 @@ class StatsView(QWidget):
 
 class ResultsDialog(QDialog):
     """Popup wrapper around `StatsView` for callers that want a modal
-    window instead of an embedded panel."""
+    window instead of an embedded panel. Loaders start immediately
+    since opening the popup is itself the request to view stats."""
 
     def __init__(self, parent, min_messages: int = 10) -> None:
         super().__init__(parent)
         self.setWindowTitle("vkdump — results")
         self.resize(1200, 720)
+        view = StatsView(self, min_messages=min_messages)
         layout = QVBoxLayout(self)
-        layout.addWidget(StatsView(self, min_messages=min_messages))
+        layout.addWidget(view)
+        view.ensure_started()
 
 
 def _hidden_footer(hidden: int, noun: str, threshold: int) -> str | None:

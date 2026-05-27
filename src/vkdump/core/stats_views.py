@@ -138,33 +138,39 @@ def users_rollup(min_messages: int = 10) -> tuple[list[dict[str, Any]], int]:
 def attachments_rollup() -> list[dict[str, Any]]:
     """One row per attachment kind: count, first/last `sent_at`, and the
     title of the chat where the most-recent one of that kind landed.
+
+    Two simple GROUP BYs joined on `kind` — no window function, no
+    materialised `ranked` CTE re-scanned twice. The right-hand subquery
+    uses SQLite's bare-column rule: when only `MAX()` is present in an
+    aggregate, all other selected columns take values from the input row
+    that produced the max.
     """
     sql = """
-    WITH ranked AS (
+    SELECT pk.kind,
+           pk.total,
+           pk.first_seen_at,
+           lk.last_seen_at,
+           lk.last_chat_title,
+           lk.last_chat_peer
+      FROM (
         SELECT a.kind,
-               m.sent_at,
-               c.title    AS chat_title,
-               c.peer_id  AS chat_peer,
-               ROW_NUMBER() OVER (
-                   PARTITION BY a.kind
-                   ORDER BY m.sent_at DESC, a.id DESC
-               ) AS rn
+               COUNT(*)        AS total,
+               MIN(m.sent_at)  AS first_seen_at
+          FROM attachments a
+          JOIN messages m ON m.id = a.message_id
+         GROUP BY a.kind
+      ) pk
+      LEFT JOIN (
+        SELECT a.kind,
+               MAX(m.sent_at)  AS last_seen_at,
+               c.title         AS last_chat_title,
+               c.peer_id       AS last_chat_peer
           FROM attachments a
           JOIN messages m ON m.id = a.message_id
           LEFT JOIN chats c ON c.id = m.chat_id
-    )
-    SELECT a.kind,
-           COUNT(*)       AS total,
-           MIN(m.sent_at) AS first_seen_at,
-           MAX(m.sent_at) AS last_seen_at,
-           (SELECT chat_title FROM ranked WHERE kind = a.kind AND rn = 1)
-                          AS last_chat_title,
-           (SELECT chat_peer  FROM ranked WHERE kind = a.kind AND rn = 1)
-                          AS last_chat_peer
-      FROM attachments a
-      JOIN messages m ON m.id = a.message_id
-     GROUP BY a.kind
-     ORDER BY total DESC
+         GROUP BY a.kind
+      ) lk ON lk.kind = pk.kind
+     ORDER BY pk.total DESC
     """
     with connection() as conn:
         return [dict(r) for r in conn.execute(sql)]

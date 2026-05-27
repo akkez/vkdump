@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
-    QProgressBar,
     QPushButton,
     QSizePolicy,
     QSpinBox,
@@ -74,6 +73,7 @@ from ..core.db import connection
 from ..tasks.registry import TASKS
 from ..tasks.spec import ParamSpec, TaskSpec
 from .results_dialog import ResultsDialog
+from .widgets.aero_progress import AeroProgressGroup
 from .workers import TaskWorker
 
 
@@ -97,6 +97,10 @@ class TaskPanel(QWidget):
         self._pool = QThreadPool.globalInstance()
         self._active_worker: TaskWorker | None = None
         self._editors: dict[str, QWidget] = {}
+        # Original text of path inputs while a task is running; the
+        # visible field gets collapsed to ".../<basename>" until the
+        # run ends, then we restore from here.
+        self._collapsed_paths: dict[str, str] = {}
 
         self._task_combo = QComboBox()
         for t in TASKS:
@@ -118,10 +122,11 @@ class TaskPanel(QWidget):
         self._cancel_btn.clicked.connect(self._on_cancel)
         self._results_btn.clicked.connect(self._on_view_results)
 
-        self._progress = QProgressBar()
+        self._progress = AeroProgressGroup()
         self._progress.setRange(0, 1)
         self._progress.setValue(0)
-        self._progress.setFormat("%v / %m  %p%")
+        self._progress.setFormat("%v / %m (%p%)")
+        self._progress.setVisible(False)
 
         # Live error counter shown next to the progress bars while a
         # task is running. Hidden when zero. Polled from a QTimer
@@ -145,7 +150,7 @@ class TaskPanel(QWidget):
         self._sub_host = QFrame()
         self._sub_layout = QVBoxLayout(self._sub_host)
         self._sub_layout.setContentsMargins(0, 0, 0, 0)
-        self._sub_bars: dict[int, tuple[QLabel, QProgressBar]] = {}
+        self._sub_bars: dict[int, AeroProgressGroup] = {}
 
         self._status = QLabel("")
         self._log = QTextEdit()
@@ -183,6 +188,7 @@ class TaskPanel(QWidget):
         # a KeyError in `_collect_params` on Run.
         task = self._current_task()
         self._description.setText(task.description)
+        self._description.setVisible(bool(task.description))
         self._editors.clear()
 
         form_widget = QWidget()
@@ -300,6 +306,45 @@ class TaskPanel(QWidget):
                 out[p.name] = text
         return out
 
+    def _freeze_path_inputs(self) -> None:
+        """Collapse path-typed inputs to '.../<basename>' and make them
+        read-only for the duration of a run."""
+        self._collapsed_paths.clear()
+        task = self._current_task()
+        for p in task.params:
+            if p.type not in ("dir", "path", "path_any"):
+                continue
+            editor = self._editors.get(p.name)
+            if editor is None:
+                continue
+            line = editor.findChild(QLineEdit)
+            if line is None:
+                continue
+            full = line.text()
+            self._collapsed_paths[p.name] = full
+            if full:
+                base = Path(full.rstrip("/").rstrip("\\")).name or full
+                line.setText(f".../{base}")
+            line.setReadOnly(True)
+            line.setCursorPosition(0)
+            for btn in editor.findChildren(QPushButton):
+                btn.setEnabled(False)
+
+    def _thaw_path_inputs(self) -> None:
+        """Restore the original full path and re-enable editing."""
+        for name, full in self._collapsed_paths.items():
+            editor = self._editors.get(name)
+            if editor is None:
+                continue
+            line = editor.findChild(QLineEdit)
+            if line is None:
+                continue
+            line.setText(full)
+            line.setReadOnly(False)
+            for btn in editor.findChildren(QPushButton):
+                btn.setEnabled(True)
+        self._collapsed_paths.clear()
+
     def _on_run(self) -> None:
         try:
             params = self._collect_params()
@@ -309,6 +354,7 @@ class TaskPanel(QWidget):
         task = self._current_task()
         self._log.clear()
         self._status.setText("running…")
+        self._progress.reset()
         self._progress.setRange(0, 1)
         self._progress.setValue(0)
 
@@ -342,6 +388,7 @@ class TaskPanel(QWidget):
         self._run_btn.setEnabled(False)
         self._cancel_btn.setEnabled(True)
         self._task_combo.setEnabled(False)
+        self._freeze_path_inputs()
         self._pool.start(worker)
 
     def _on_cancel(self) -> None:
@@ -356,7 +403,7 @@ class TaskPanel(QWidget):
         self._progress.setRange(0, total)
         self._progress.setValue(current)
         if message:
-            self._status.setText(_strip_markup(message))
+            self._progress.setStatus(_strip_markup(message))
 
     def _on_log(self, message: str) -> None:
         self._log.append(_strip_markup(message))
@@ -365,45 +412,42 @@ class TaskPanel(QWidget):
         self._progress.setVisible(False)
 
     def _on_sub_started(self, sub_id: int, label: str, total: int) -> None:
-        lbl = QLabel(_strip_markup(label))
-        bar = QProgressBar()
-        bar.setRange(0, total if total > 0 else 1)
-        bar.setValue(0)
-        bar.setFormat("%v / %m  %p%")
-        self._sub_layout.addWidget(lbl)
-        self._sub_layout.addWidget(bar)
-        self._sub_bars[sub_id] = (lbl, bar)
+        group = AeroProgressGroup()
+        group.setRange(0, total if total > 0 else 1)
+        group.setValue(0)
+        group.setFormat("%v / %m (%p%)")
+        group.setStatus(_strip_markup(label))
+        self._sub_layout.addWidget(group)
+        self._sub_bars[sub_id] = group
 
     def _on_sub_progress(self, sub_id: int, current: int, total: int, message: str) -> None:
-        entry = self._sub_bars.get(sub_id)
-        if entry is None:
+        group = self._sub_bars.get(sub_id)
+        if group is None:
             return
-        lbl, bar = entry
         if total <= 0:
             total = max(current, 1)
-        bar.setRange(0, total)
-        bar.setValue(current)
+        group.setRange(0, total)
+        group.setValue(current)
         if message:
-            lbl.setText(_strip_markup(message))
+            group.setStatus(_strip_markup(message))
 
     def _on_sub_ended(self, sub_id: int) -> None:
         self._remove_sub_bar(sub_id)
 
     def _remove_sub_bar(self, sub_id: int) -> None:
-        entry = self._sub_bars.pop(sub_id, None)
-        if entry is None:
+        group = self._sub_bars.pop(sub_id, None)
+        if group is None:
             return
-        lbl, bar = entry
-        self._sub_layout.removeWidget(lbl)
-        self._sub_layout.removeWidget(bar)
-        lbl.deleteLater()
-        bar.deleteLater()
+        self._sub_layout.removeWidget(group)
+        group.deleteLater()
 
     def _reset_buttons(self) -> None:
         self._run_btn.setEnabled(True)
         self._cancel_btn.setEnabled(False)
         self._task_combo.setEnabled(True)
+        self._thaw_path_inputs()
         self._active_worker = None
+        self._progress.setVisible(False)
         # One last poll so the final counts land before we stop.
         self._poll_errors()
         self._errors_timer.stop()

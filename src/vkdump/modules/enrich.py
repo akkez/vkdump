@@ -312,10 +312,9 @@ async def _download_all(
                 if progress_throttle(done, total):
                     progress.report(
                         done, total,
-                        f"enrich-media: {done}/{total}  "
                         f"ok={stats[STATUS_OK]} failed={stats[STATUS_FAILED]} "
-                        f"skipped={stats[STATUS_SKIPPED]}  "
-                        f"total {_fmt_bytes(bytes_total)} / {_fmt_bytes(bps)}/s",
+                        f"skipped={stats[STATUS_SKIPPED]} · "
+                        f"{_fmt_bytes(bytes_total)} @ {_fmt_bytes(bps)}/s",
                     )
                 try:
                     progress.check_cancelled()

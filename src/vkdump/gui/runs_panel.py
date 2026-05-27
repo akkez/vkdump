@@ -16,6 +16,13 @@ from ..core.runs import list_runs
 COLUMNS = ("id", "task", "status", "started_at", "finished_at", "error")
 
 
+# GUI-only renames for task ids stored under their legacy names in the
+# DB / CLI. Keeps history rows readable without a migration.
+_TASK_DISPLAY = {
+    "enrich-media": "download-media",
+}
+
+
 class RunsPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -43,7 +50,7 @@ class RunsPanel(QWidget):
         for r, run in enumerate(rows):
             values = (
                 str(run.id),
-                run.task,
+                _TASK_DISPLAY.get(run.task, run.task),
                 run.status,
                 run.started_at.isoformat(timespec="seconds"),
                 run.finished_at.isoformat(timespec="seconds") if run.finished_at else "",

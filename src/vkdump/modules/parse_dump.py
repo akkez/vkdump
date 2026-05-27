@@ -181,10 +181,10 @@ def _run_with_discovery(
         # Sub-tasks render in the order they're added, so the chat scope is
         # opened first to land on top.
         with progress.sub(
-            "[cyan]chat:[/cyan] —", total=max(1, len(chat_plans[0][2]) if chat_plans else 1),
+            "[cyan]chat:[/cyan]", total=max(1, len(chat_plans[0][2]) if chat_plans else 1),
         ) as chat_bar:
             with progress.sub(
-                f"[green]global:[/green] 0/{global_total} pages",
+                "[green]Total progress:[/green]",
                 total=global_total_or_one,
             ) as global_bar:
                 for chat_idx, (chat_rel, chat_name, pages) in enumerate(chat_plans, start=1):
@@ -203,7 +203,7 @@ def _run_with_discovery(
                     page_count_for_chat = max(len(pages), 1)
                     chat_bar.report(
                         0, page_count_for_chat,
-                        f"[cyan]chat:[/cyan] {chat_label}  0/{len(pages)} pages",
+                        f"[cyan]chat:[/cyan] {chat_label}",
                     )
 
                     def _on_page_done(
@@ -214,7 +214,7 @@ def _run_with_discovery(
                         if global_throttle(global_done, global_total_or_one):
                             global_bar.report(
                                 global_done, global_total_or_one,
-                                f"[green]global:[/green] {global_done}/{global_total} pages  (now: {_label})",
+                                "",
                             )
 
                     summary = _parse_one_chat(
@@ -233,7 +233,7 @@ def _run_with_discovery(
                     chat_summaries.append(summary)
                 global_bar.report(
                     global_total_or_one, global_total_or_one,
-                    f"[green]global:[/green] {global_total}/{global_total} pages — done",
+                    "",
                 )
 
     # ---------- single-file mode ----------
@@ -504,7 +504,7 @@ def _parse_one_chat(
                 chat_disp = _format_chat_label(chat_name, index_entry)
                 progress.report(
                     page_idx, page_count,
-                    f"[cyan]chat:[/cyan] {chat_disp}  {page_idx}/{page_count} pages",
+                    f"[cyan]chat:[/cyan] {chat_disp}",
                 )
             if on_page_done is not None:
                 on_page_done()

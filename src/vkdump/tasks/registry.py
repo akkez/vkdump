@@ -59,7 +59,7 @@ TASKS: list[TaskSpec] = [
     ),
     TaskSpec(
         name="stats",
-        title="Compute statistics",
+        title="Stats",
         description="Brief summary: chats, users, messages, attachments by kind, top chats / senders, parse errors.",
         params=[],
         run=stats.run,

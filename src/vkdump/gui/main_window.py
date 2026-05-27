@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import QMainWindow, QTabWidget
 
-from .runs_panel import RunsPanel
+from ..tasks.registry import TASKS
+from .results_dialog import StatsView
 from .task_panel import TaskPanel
 
 
@@ -10,15 +11,16 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("vkdump")
         self.resize(900, 640)
 
+        # One tab per registered task, with `stats` rendered as the
+        # embedded `StatsView` (instead of a form-driven task panel) so
+        # clicking the tab is the "view results" experience. The Runs
+        # history panel is hidden for now — wire it back when the user
+        # asks.
         self._tabs = QTabWidget()
-        self._task_panel = TaskPanel()
-        self._runs_panel = RunsPanel()
-        self._tabs.addTab(self._task_panel, "Tasks")
-        self._tabs.addTab(self._runs_panel, "Runs")
-        self._tabs.currentChanged.connect(self._on_tab_changed)
+        for task in TASKS:
+            if task.name == "stats":
+                self._tabs.addTab(StatsView(), "Stats")
+            else:
+                self._tabs.addTab(TaskPanel(task), task.title)
 
         self.setCentralWidget(self._tabs)
-
-    def _on_tab_changed(self, index: int) -> None:
-        if self._tabs.widget(index) is self._runs_panel:
-            self._runs_panel.refresh()

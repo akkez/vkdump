@@ -1,11 +1,10 @@
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -16,12 +15,16 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSpinBox,
-    QStackedWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 from rich.text import Text
+
+from ..core.db import connection
+from ..tasks.spec import ParamSpec, TaskSpec
+from .widgets.aero_progress import AeroProgressGroup
+from .workers import TaskWorker
 
 
 class _ClickyLineEdit(QLineEdit):
@@ -37,13 +40,6 @@ class _ClickyLineEdit(QLineEdit):
         if not self.text().strip():
             self.clicked_when_empty.emit()
 
-from ..core.db import connection
-from ..tasks.registry import TASKS
-from ..tasks.spec import ParamSpec, TaskSpec
-from .results_dialog import ResultsDialog
-from .widgets.aero_progress import AeroProgressGroup
-from .workers import TaskWorker
-
 
 def _strip_markup(s: str) -> str:
     """Drop Rich-style `[green]…[/green]` markup so it doesn't show up
@@ -58,10 +54,13 @@ def _strip_markup(s: str) -> str:
 
 
 class TaskPanel(QWidget):
-    """Auto-generated UI for any TaskSpec from the registry."""
+    """Auto-generated UI for one `TaskSpec`. The main window creates one
+    panel per task and parks each in its own tab; there's no in-panel
+    task switcher."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, task: TaskSpec, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._task = task
         self._pool = QThreadPool.globalInstance()
         self._active_worker: TaskWorker | None = None
         self._editors: dict[str, QWidget] = {}
@@ -70,25 +69,23 @@ class TaskPanel(QWidget):
         # run ends, then we restore from here.
         self._collapsed_paths: dict[str, str] = {}
 
-        self._task_combo = QComboBox()
-        for t in TASKS:
-            self._task_combo.addItem(t.title, t.name)
-        self._task_combo.currentIndexChanged.connect(self._rebuild_form)
-
-        self._description = QLabel()
+        self._description = QLabel(task.description)
         self._description.setWordWrap(True)
         self._description.setStyleSheet("color: gray;")
+        self._description.setVisible(bool(task.description))
 
-        self._form_host = QStackedWidget()
+        form_widget = QWidget()
+        form = QFormLayout(form_widget)
+        for p in task.params:
+            editor = self._make_editor(p)
+            self._editors[p.name] = editor
+            form.addRow(p.label + ":", editor)
 
         self._run_btn = QPushButton("Run")
         self._cancel_btn = QPushButton("Cancel")
-        self._results_btn = QPushButton("View results…")
         self._cancel_btn.setEnabled(False)
-        self._results_btn.setEnabled(False)
         self._run_btn.clicked.connect(self._on_run)
         self._cancel_btn.clicked.connect(self._on_cancel)
-        self._results_btn.clicked.connect(self._on_view_results)
 
         self._progress = AeroProgressGroup()
         self._progress.setRange(0, 1)
@@ -127,50 +124,17 @@ class TaskPanel(QWidget):
         btn_row = QHBoxLayout()
         btn_row.addWidget(self._run_btn)
         btn_row.addWidget(self._cancel_btn)
-        btn_row.addWidget(self._results_btn)
         btn_row.addStretch(1)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Task"))
-        layout.addWidget(self._task_combo)
         layout.addWidget(self._description)
-        layout.addWidget(self._form_host)
+        layout.addWidget(form_widget)
         layout.addLayout(btn_row)
         layout.addWidget(self._progress)
         layout.addWidget(self._sub_host)
         layout.addWidget(self._errors_label)
         layout.addWidget(self._status)
         layout.addWidget(self._log, 1)
-
-        self._rebuild_form()
-
-    def _current_task(self) -> TaskSpec:
-        name = self._task_combo.currentData()
-        return next(t for t in TASKS if t.name == name)
-
-    def _rebuild_form(self, _index: int = 0) -> None:
-        # `_index` is supplied by `QComboBox.currentIndexChanged(int)` —
-        # accepting it explicitly so PySide6 doesn't silently swallow a
-        # TypeError when invoking the slot, which would leave
-        # `self._editors` populated from the previous task and trigger
-        # a KeyError in `_collect_params` on Run.
-        task = self._current_task()
-        self._description.setText(task.description)
-        self._description.setVisible(bool(task.description))
-        self._editors.clear()
-
-        form_widget = QWidget()
-        form = QFormLayout(form_widget)
-        for p in task.params:
-            editor = self._make_editor(p)
-            self._editors[p.name] = editor
-            form.addRow(p.label + ":", editor)
-
-        while self._form_host.count():
-            w = self._form_host.widget(0)
-            self._form_host.removeWidget(w)
-            w.deleteLater()
-        self._form_host.addWidget(form_widget)
 
     def _make_editor(self, p: ParamSpec) -> QWidget:
         if p.type in ("dir", "path", "path_any"):
@@ -247,15 +211,8 @@ class TaskPanel(QWidget):
         return line
 
     def _collect_params(self) -> dict[str, Any]:
-        task = self._current_task()
-        # If signal wiring failed to keep the form in sync with the
-        # combo (the historic root cause of the "KeyError: 'kinds'"
-        # bug), rebuild here so Run still works without a restart.
-        expected = {p.name for p in task.params}
-        if expected - self._editors.keys():
-            self._rebuild_form()
         out: dict[str, Any] = {}
-        for p in task.params:
+        for p in self._task.params:
             editor = self._editors[p.name]
             if p.type in ("dir", "path", "path_any"):
                 line = editor.findChild(QLineEdit)
@@ -278,8 +235,7 @@ class TaskPanel(QWidget):
         """Collapse path-typed inputs to '.../<basename>' and make them
         read-only for the duration of a run."""
         self._collapsed_paths.clear()
-        task = self._current_task()
-        for p in task.params:
+        for p in self._task.params:
             if p.type not in ("dir", "path", "path_any"):
                 continue
             editor = self._editors.get(p.name)
@@ -319,7 +275,6 @@ class TaskPanel(QWidget):
         except ValueError as e:
             self._status.setText(f"error: {e}")
             return
-        task = self._current_task()
         self._log.clear()
         self._status.setText("running…")
         self._progress.reset()
@@ -341,7 +296,7 @@ class TaskPanel(QWidget):
             ).fetchone()[0]
         self._errors_timer.start()
 
-        worker = TaskWorker(task, params)
+        worker = TaskWorker(self._task, params)
         worker.signals.progress.connect(self._on_progress)
         worker.signals.log.connect(self._on_log)
         worker.signals.finished.connect(self._on_finished)
@@ -355,7 +310,6 @@ class TaskPanel(QWidget):
 
         self._run_btn.setEnabled(False)
         self._cancel_btn.setEnabled(True)
-        self._task_combo.setEnabled(False)
         self._freeze_path_inputs()
         self._pool.start(worker)
 
@@ -412,7 +366,6 @@ class TaskPanel(QWidget):
     def _reset_buttons(self) -> None:
         self._run_btn.setEnabled(True)
         self._cancel_btn.setEnabled(False)
-        self._task_combo.setEnabled(True)
         self._thaw_path_inputs()
         self._active_worker = None
         self._progress.setVisible(False)
@@ -453,17 +406,9 @@ class TaskPanel(QWidget):
             self._errors_label.setVisible(False)
             self._errors_label.setText("")
 
-    def _on_view_results(self) -> None:
-        # The dialog opens instantly with empty tabs and runs the three
-        # rollups itself in the background — see `ResultsDialog`.
-        ResultsDialog(self).exec()
-
     def _on_finished(self, run_id: int, result: object) -> None:
         self._status.setText(f"ok — run #{run_id}")
-        # Skip dumping the raw dict — the user has the Results dialog
-        # for a structured view now. Just acknowledge completion.
-        self._log.append(f"run #{run_id} completed — click View results…")
-        self._results_btn.setEnabled(True)
+        self._log.append(f"run #{run_id} completed")
         self._reset_buttons()
 
     def _on_failed(self, run_id: int, error: str) -> None:

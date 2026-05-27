@@ -1,10 +1,13 @@
-"""Results dialog shown after a task completes.
+"""Stats view + a thin dialog wrapper.
 
-Opens immediately with three empty tabs (column headers visible); each
-tab loads its rollup in a background `QThreadPool` runnable so the GUI
-thread never blocks. Tab titles show `(loading…)` until data arrives,
-then switch to the row count. Loaders for all three tabs are kicked off
-in parallel on construction, so switching tabs never waits.
+`StatsView` is the actual widget — three sub-tabs (chats / users /
+attachments), each populated by its own background `QThreadPool`
+runnable so the GUI thread never blocks. Tab titles show `(loading…)`
+until data arrives, then switch to the row count. Loaders for all three
+tabs are kicked off in parallel on construction.
+
+`ResultsDialog` is a thin dialog wrapper kept for callers that want a
+popup; the main window embeds `StatsView` directly in a tab.
 """
 from __future__ import annotations
 
@@ -221,15 +224,14 @@ _ATT_COLS: list[tuple[str, str]] = [
 ]
 
 
-class ResultsDialog(QDialog):
-    """Tabbed read-only summary. Opens instantly with empty tabs, then
-    fills them as background rollups complete."""
+class StatsView(QWidget):
+    """Tabbed read-only summary. Builds instantly with empty tabs, then
+    fills them as background rollups complete. Embeddable inline (e.g.
+    as a main-window tab) or wrappable in a dialog via `ResultsDialog`.
+    """
 
-    def __init__(self, parent, min_messages: int = 10) -> None:
+    def __init__(self, parent: QWidget | None = None, min_messages: int = 10) -> None:
         super().__init__(parent)
-        self.setWindowTitle("vkdump — results")
-        self.resize(1200, 720)
-
         self._min_messages = min_messages
         self._pool = QThreadPool.globalInstance()
         # Hold references to in-flight runnables: the pool owns them on
@@ -247,6 +249,7 @@ class ResultsDialog(QDialog):
         self._att_idx = self._tabs.addTab(self._att_tab, "Attachments (loading…)")
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._tabs)
 
         self._start_loaders()
@@ -305,6 +308,18 @@ class ResultsDialog(QDialog):
     def _on_att_failed(self, error: str) -> None:
         self._att_tab.show_error(error)
         self._tabs.setTabText(self._att_idx, "Attachments (error)")
+
+
+class ResultsDialog(QDialog):
+    """Popup wrapper around `StatsView` for callers that want a modal
+    window instead of an embedded panel."""
+
+    def __init__(self, parent, min_messages: int = 10) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("vkdump — results")
+        self.resize(1200, 720)
+        layout = QVBoxLayout(self)
+        layout.addWidget(StatsView(self, min_messages=min_messages))
 
 
 def _hidden_footer(hidden: int, noun: str, threshold: int) -> str | None:

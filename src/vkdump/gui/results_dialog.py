@@ -125,9 +125,22 @@ class _Rollup(QRunnable):
         try:
             result = self._fn()
         except Exception as exc:  # noqa: BLE001
-            self.signals.failed.emit(f"{type(exc).__name__}: {exc}")
+            self._safe_emit(self.signals.failed, f"{type(exc).__name__}: {exc}")
             return
-        self.signals.done.emit(result)
+        self._safe_emit(self.signals.done, result)
+
+    @staticmethod
+    def _safe_emit(signal, payload) -> None:
+        """Emit, but tolerate the receiver QObject having been torn
+        down — happens on Cmd+Q when the StatsView is destroyed while
+        a worker is mid-run. Without this the worker thread prints
+        "RuntimeError: Signal source has been deleted" and the app
+        looks like it failed to exit cleanly.
+        """
+        try:
+            signal.emit(payload)
+        except RuntimeError:
+            pass
 
 
 class _Tab(QWidget):

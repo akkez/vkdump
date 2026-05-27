@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QMainWindow, QTabWidget
+from PySide6.QtWidgets import QMainWindow, QMessageBox, QTabWidget
 
 from ..tasks.registry import TASKS
 from .results_dialog import StatsView
@@ -17,10 +17,34 @@ class MainWindow(QMainWindow):
         # history panel is hidden for now — wire it back when the user
         # asks.
         self._tabs = QTabWidget()
+        self._task_panels: list[TaskPanel] = []
         for task in TASKS:
             if task.name == "stats":
                 self._tabs.addTab(StatsView(), "Stats")
             else:
-                self._tabs.addTab(TaskPanel(task), task.title)
+                panel = TaskPanel(task)
+                self._task_panels.append(panel)
+                self._tabs.addTab(panel, task.title)
 
         self.setCentralWidget(self._tabs)
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        active = [p for p in self._task_panels if p.has_active_run()]
+        if not active:
+            event.accept()
+            return
+        names = ", ".join(p._task.title for p in active)
+        reply = QMessageBox.question(
+            self,
+            "Task running",
+            (
+                f"A task is still running ({names}). "
+                f"Quit anyway? Any in-flight work will be abandoned."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            event.accept()
+        else:
+            event.ignore()

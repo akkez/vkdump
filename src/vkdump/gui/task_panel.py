@@ -295,6 +295,11 @@ class TaskPanel(QWidget):
                 btn.setEnabled(True)
         self._collapsed_paths.clear()
 
+    def has_active_run(self) -> bool:
+        """True while a TaskWorker is in flight. The main window uses
+        this to decide whether to ask the user before quitting."""
+        return self._active_worker is not None
+
     def _on_run(self) -> None:
         try:
             params = self._collect_params()

@@ -1,8 +1,10 @@
 import signal
 import sys
+
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
-from ..core.db import apply_migrations
+from ..core.db import apply_migrations, resource_dir
 from .main_window import MainWindow
 
 
@@ -15,6 +17,9 @@ def main() -> int:
 
     apply_migrations()
     qt_app = QApplication(sys.argv)
+    icon_path = resource_dir() / "assets" / "icon.png"
+    if icon_path.is_file():
+        qt_app.setWindowIcon(QIcon(str(icon_path)))
     window = MainWindow()
     window.show()
     return qt_app.exec()

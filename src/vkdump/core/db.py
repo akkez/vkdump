@@ -24,7 +24,7 @@ def app_dir() -> Path:
     return exe.parent
 
 
-def _resource_dir() -> Path:
+def resource_dir() -> Path:
     """Read-only bundled resources: sys._MEIPASS when frozen, repo root otherwise."""
     if _frozen():
         return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
@@ -39,7 +39,7 @@ def resolve_db_path() -> Path:
 
 
 def _migrations_dir() -> Path:
-    return _resource_dir() / "migrations"
+    return resource_dir() / "migrations"
 
 
 @contextmanager

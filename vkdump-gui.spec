@@ -8,7 +8,10 @@ a = Analysis(
     [str(SPEC_DIR / "gui_main.py")],
     pathex=[str(SPEC_DIR / "src")],
     binaries=[],
-    datas=[(str(SPEC_DIR / "migrations"), "migrations")],
+    datas=[
+        (str(SPEC_DIR / "migrations"), "migrations"),
+        (str(SPEC_DIR / "assets"), "assets"),
+    ],
     hiddenimports=[],
     hookspath=[],
     runtime_hooks=[],
@@ -17,6 +20,9 @@ a = Analysis(
 )
 
 pyz = PYZ(a.pure)
+
+_ICNS = SPEC_DIR / "assets" / "icon.icns"
+_BUNDLE_ICON = str(_ICNS) if _ICNS.is_file() else None
 
 exe = EXE(
     pyz,
@@ -30,7 +36,7 @@ exe = EXE(
     upx=False,
     console=False,
     disable_windowed_traceback=False,
-    icon=None,
+    icon=_BUNDLE_ICON,
 )
 
 coll = COLLECT(
@@ -47,6 +53,6 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="vkdump-gui.app",
-        icon=None,
+        icon=_BUNDLE_ICON,
         bundle_identifier="com.vkdump.gui",
     )

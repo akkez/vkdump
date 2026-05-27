@@ -5,6 +5,7 @@ from PySide6.QtCore import QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -204,6 +205,23 @@ class TaskPanel(QWidget):
             cb = QCheckBox()
             cb.setChecked(bool(p.default))
             return cb
+        if p.type == "choice":
+            cb = QComboBox()
+            opts = list(p.choices)
+            if p.choices_provider is not None:
+                try:
+                    opts.extend(p.choices_provider())
+                except Exception as exc:  # noqa: BLE001
+                    # A failing provider shouldn't break the entire form;
+                    # the static `choices` (if any) still render.
+                    cb.addItem(f"<choices unavailable: {exc}>", "")
+            for value, label in opts:
+                cb.addItem(label, value)
+            if p.default is not None:
+                idx = cb.findData(str(p.default))
+                if idx >= 0:
+                    cb.setCurrentIndex(idx)
+            return cb
         line = QLineEdit()
         if p.default is not None:
             line.setText(str(p.default))
@@ -224,6 +242,12 @@ class TaskPanel(QWidget):
                 out[p.name] = editor.value()
             elif p.type == "bool":
                 out[p.name] = editor.isChecked()
+            elif p.type == "choice":
+                # Empty-string sentinel == "no selection" (e.g. the
+                # "All chats" placeholder); treat it as missing rather
+                # than passing the literal "" downstream.
+                val = editor.currentData()
+                out[p.name] = val if val not in (None, "") else None
             else:
                 text = editor.text().strip()
                 if not text and p.required:

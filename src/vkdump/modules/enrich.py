@@ -59,17 +59,31 @@ _IMAGE_MAGICS: list[tuple[bytes, str]] = [
 ]
 
 
+VALID_STRATEGIES = ("default", "groups-first", "dms-first", "my-uploads-first")
+
+
 def run(params: dict, progress: ProgressReporter) -> dict:
     kinds = _coerce_kinds(params.get("kinds"))
     concurrency = int(params.get("concurrency") or DEFAULT_CONCURRENCY)
     per_host = int(params.get("per_host") or DEFAULT_PER_HOST)
     timeout_s = int(params.get("timeout") or DEFAULT_TIMEOUT)
+    chat_scope = params.get("chat_scope")
+    if chat_scope in ("", None):
+        chat_scope = None
+    else:
+        chat_scope = str(chat_scope).strip() or None
+    strategy = (params.get("strategy") or "default").strip()
+    if strategy not in VALID_STRATEGIES:
+        progress.log(
+            f"enrich-media: unknown strategy {strategy!r}, falling back to 'default'"
+        )
+        strategy = "default"
     skipped_unsupported = _mark_unsupported_urls(kinds)
     if skipped_unsupported:
         progress.log(
             f"enrich-media: skipped {skipped_unsupported} on-site vk.com photo URLs"
         )
-    rows = _pick_rows(kinds)
+    rows = _pick_rows(kinds, chat_scope=chat_scope, strategy=strategy)
     if not rows:
         progress.log(f"enrich-media: nothing to download for kinds={list(kinds)}")
         return {
@@ -80,10 +94,12 @@ def run(params: dict, progress: ProgressReporter) -> dict:
             "skipped": 0,
         }
 
+    scope_note = f" chat_scope={chat_scope}" if chat_scope else ""
+    strat_note = f" strategy={strategy}" if strategy != "default" else ""
     progress.log(
         f"enrich-media: {len(rows)} attachment(s) to fetch "
         f"(kinds={list(kinds)}, concurrency={concurrency}, per_host={per_host}, "
-        f"timeout={timeout_s}s)"
+        f"timeout={timeout_s}s{scope_note}{strat_note})"
     )
 
     static_root = _static_root()
@@ -153,7 +169,11 @@ def _mark_unsupported_urls(kinds: tuple[str, ...]) -> int:
         return cur.rowcount or 0
 
 
-def _pick_rows(kinds: tuple[str, ...]) -> list[sqlite3.Row]:
+def _pick_rows(
+    kinds: tuple[str, ...],
+    chat_scope: str | None = None,
+    strategy: str = "default",
+) -> list[sqlite3.Row]:
     """Pick attachments that still need fetching.
 
     Filters at the SQL level by:
@@ -165,6 +185,16 @@ def _pick_rows(kinds: tuple[str, ...]) -> list[sqlite3.Row]:
       queue regardless of their stored status.
     - `download_status` is **not** 'skipped' — explicit skips stay out
       until the user re-queues them by hand.
+    - If `chat_scope` is set: restrict to attachments from messages
+      whose chat has that `peer_id`.
+
+    `strategy` controls ordering only — every queued attachment still
+    gets downloaded eventually:
+
+    - "default":         DB order (rowid).
+    - "groups-first":    `chats.type = 'group_chat'` first.
+    - "dms-first":       `chats.type = 'dm'` first.
+    - "my-uploads-first": `messages.sender_is_self = 1` first.
 
     Among the remaining rows, those at status='ok' whose `local_path`
     is still present on disk are dropped in Python; rows whose file
@@ -174,19 +204,45 @@ def _pick_rows(kinds: tuple[str, ...]) -> list[sqlite3.Row]:
         return []
     placeholders = ",".join("?" * len(kinds))
     static_root = _static_root()
+
+    needs_join = chat_scope is not None or strategy != "default"
+    args: list = []
+    if needs_join:
+        sql = f"""
+        SELECT a.id, a.kind, a.url, a.local_path, a.download_status
+          FROM attachments a
+          JOIN messages m ON m.id = a.message_id
+          JOIN chats c    ON c.id = m.chat_id
+         WHERE a.kind IN ({placeholders})
+           AND a.url IS NOT NULL
+           AND a.url != ''
+           AND a.url NOT LIKE 'https://vk.com/%'
+           AND a.download_status != ?
+        """
+        args.extend([*kinds, STATUS_SKIPPED])
+        if chat_scope is not None:
+            sql += " AND c.peer_id = ?"
+            args.append(chat_scope)
+        if strategy == "groups-first":
+            sql += " ORDER BY (c.type = 'group_chat') DESC, a.id"
+        elif strategy == "dms-first":
+            sql += " ORDER BY (c.type = 'dm') DESC, a.id"
+        elif strategy == "my-uploads-first":
+            sql += " ORDER BY m.sender_is_self DESC, a.id"
+    else:
+        sql = f"""
+        SELECT id, kind, url, local_path, download_status
+          FROM attachments
+         WHERE kind IN ({placeholders})
+           AND url IS NOT NULL
+           AND url != ''
+           AND url NOT LIKE 'https://vk.com/%'
+           AND download_status != ?
+        """
+        args.extend([*kinds, STATUS_SKIPPED])
+
     with connection() as conn:
-        candidates = conn.execute(
-            f"""
-            SELECT id, kind, url, local_path, download_status
-              FROM attachments
-             WHERE kind IN ({placeholders})
-               AND url IS NOT NULL
-               AND url != ''
-               AND url NOT LIKE 'https://vk.com/%'
-               AND download_status != ?
-            """,
-            (*kinds, STATUS_SKIPPED),
-        ).fetchall()
+        candidates = conn.execute(sql, args).fetchall()
     out: list[sqlite3.Row] = []
     for r in candidates:
         if r["download_status"] == STATUS_OK:

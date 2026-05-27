@@ -150,6 +150,23 @@ def enrich_media_cmd(
         str,
         typer.Option("--kinds", help="Comma-separated attachment kinds (default: photo)."),
     ] = "photo",
+    chat: Annotated[
+        str | None,
+        typer.Option(
+            "--chat",
+            help="Limit to one conversation by `chats.peer_id`. Default: every chat.",
+        ),
+    ] = None,
+    strategy: Annotated[
+        str,
+        typer.Option(
+            "--strategy",
+            help=(
+                "Ordering: default | groups-first | dms-first | my-uploads-first. "
+                "Affects what gets fetched first, not the final set."
+            ),
+        ),
+    ] = "default",
     concurrency: Annotated[
         int, typer.Option("--concurrency", "-c", help="Total concurrent downloads."),
     ] = 16,
@@ -164,6 +181,8 @@ def enrich_media_cmd(
     kind_list = [k.strip() for k in kinds.split(",") if k.strip()]
     _run("enrich-media", {
         "kinds": kind_list,
+        "chat_scope": chat,
+        "strategy": strategy,
         "concurrency": concurrency,
         "per_host": per_host,
         "timeout": timeout,

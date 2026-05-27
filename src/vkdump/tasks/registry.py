@@ -2,6 +2,35 @@ from ..modules import parse_dump, enrich, stats
 from .spec import ParamSpec, TaskSpec
 
 
+def _chat_scope_choices() -> list[tuple[str, str]]:
+    """Populate the enrich-media chat-scope dropdown from the DB at
+    form-build time. Returns (peer_id-as-string, label) pairs ordered
+    by message count desc so the busiest chats land at the top.
+    """
+    from ..core.db import connection
+    out: list[tuple[str, str]] = [("", "All chats")]
+    try:
+        with connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT peer_id, title, type, message_count
+                  FROM chats
+                 WHERE peer_id IS NOT NULL AND peer_id != ''
+                 ORDER BY message_count DESC, id
+                 LIMIT 500
+                """
+            ).fetchall()
+    except Exception:
+        return out
+    for r in rows:
+        title = (r["title"] or "").strip() or "(untitled)"
+        tag = r["type"] or "?"
+        out.append(
+            (str(r["peer_id"]), f"{title} — {tag} (peer_id={r['peer_id']})")
+        )
+    return out
+
+
 TASKS: list[TaskSpec] = [
     TaskSpec(
         name="parse-dump",
@@ -29,6 +58,29 @@ TASKS: list[TaskSpec] = [
                 help="Comma-separated kinds to download. Default: photo.",
                 required=False,
                 default="photo",
+            ),
+            ParamSpec(
+                name="chat_scope",
+                type="choice",
+                label="Chat scope",
+                help="Restrict downloads to one chat. Leave at 'All chats' to consider every conversation.",
+                required=False,
+                default="",
+                choices_provider=_chat_scope_choices,
+            ),
+            ParamSpec(
+                name="strategy",
+                type="choice",
+                label="Strategy",
+                help="Ordering — every queued attachment still gets downloaded eventually, this just controls what goes first.",
+                required=False,
+                default="default",
+                choices=[
+                    ("default", "Default (DB order)"),
+                    ("groups-first", "Group chats first"),
+                    ("dms-first", "DMs first"),
+                    ("my-uploads-first", "My uploads first"),
+                ],
             ),
             ParamSpec(
                 name="concurrency",

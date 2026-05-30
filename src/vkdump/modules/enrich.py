@@ -25,9 +25,7 @@ import sqlite3
 import ssl
 import time
 from collections import deque
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 import aiohttp
 import certifi
@@ -99,6 +97,8 @@ def run(params: dict, progress: ProgressReporter) -> dict:
     rows, resolved = _pick_rows(
         kinds, chat_scope=chat_scope, strategy=strategy, progress=progress,
     )
+    # `_pick_rows` drove the main bar during the scan phase; the
+    # downloader phase below will overwrite it with its own (done, total).
     if not rows:
         progress.log(
             f"enrich-media: nothing to download for kinds={list(kinds)} "
@@ -200,21 +200,22 @@ def _pick_rows(
     """Pick attachments that still need fetching.
 
     Chunked, keyset-paginated scan: walks rows in ascending `a.id` order
-    in `_SCAN_CHUNK`-sized batches, reporting against a precomputed
-    COUNT(*) via `progress.sub()`. Avoids a single huge ORDER BY on
-    multi-million-row tables and keeps the UI thread visibly fed.
+    in `_SCAN_CHUNK`-sized batches. Each chunk reports progress against
+    `MAX(attachments.id)` — a single index probe, cheap even on
+    multi-million-row tables. The denominator is approximate (it counts
+    every attachment, not just in-scope ones), but the bar tracks the
+    cursor walking through the rowid range, so it fills smoothly to
+    100% by the time the scan finishes. The user-visible cost: zero
+    upfront wait before the first chunk lands.
 
     File existence is **not** checked here. Rows already at status='ok'
     are trusted and excluded from the queue; if a file vanished, a manual
-    re-run with status reset is required to re-queue it. This trades a
-    less self-healing resume for skipping millions of stat() calls on
-    big mirrors. Status='skipped' rows are likewise excluded.
+    re-run with status reset is required to re-queue it. Status='skipped'
+    rows are likewise excluded.
 
-    Sort by `strategy` happens in Python after the scan. The keep-list
-    is typically the unresolved tail (small), so an in-memory sort there
-    is much cheaper than a SQL ORDER BY across every candidate.
+    Sort by `strategy` happens in Python after the scan.
 
-    Filters (same as before, but enforced per chunk):
+    Filters:
 
     - kind ∈ `kinds`
     - URL present
@@ -232,9 +233,8 @@ def _pick_rows(
     - "dms-first":        `chats.type = 'dm'` first.
     - "my-uploads-first": `messages.sender_is_self = 1` first.
 
-    Returns `(rows_to_do, resolved_count)`. `resolved_count` is the number
-    of in-scope candidates excluded as status ∈ {'ok','skipped'} so the
-    bar can resume at the right percent.
+    Returns `(rows_to_do, resolved_count)`. `resolved_count` is the
+    number of in-scope candidates excluded as status ∈ {'ok','skipped'}.
     """
     if not kinds:
         return [], 0
@@ -245,18 +245,6 @@ def _pick_rows(
     chat_select = ", c.type AS chat_type" if needs_chats else ""
     scope_clause = " AND c.peer_id = ?" if chat_scope is not None else ""
 
-    base_where = (
-        f" WHERE a.kind IN ({placeholders})"
-        " AND a.url IS NOT NULL AND a.url != ''"
-        " AND a.url NOT LIKE 'https://vk.com/%'"
-        f"{scope_clause}"
-    )
-    count_sql = (
-        "SELECT COUNT(*) FROM attachments a"
-        " JOIN messages m ON m.id = a.message_id"
-        f"{chat_join}"
-        f"{base_where}"
-    )
     chunk_sql = (
         "SELECT a.id, a.kind, a.url, a.local_path, a.download_status,"
         " m.id AS message_id, m.sender_is_self"
@@ -264,60 +252,54 @@ def _pick_rows(
         " FROM attachments a"
         " JOIN messages m ON m.id = a.message_id"
         f"{chat_join}"
-        f"{base_where} AND a.id > ?"
+        " WHERE a.id > ?"
+        f" AND a.kind IN ({placeholders})"
+        " AND a.url IS NOT NULL AND a.url != ''"
+        " AND a.url NOT LIKE 'https://vk.com/%'"
+        f"{scope_clause}"
         " ORDER BY a.id ASC LIMIT ?"
     )
-
     base_args: list = [*kinds]
     if chat_scope is not None:
         base_args.append(chat_scope)
 
-    with connection() as conn:
-        total = int(conn.execute(count_sql, base_args).fetchone()[0])
-
-    if total == 0:
-        return [], 0
-
     keep: list[sqlite3.Row] = []
     resolved = 0
     last_id = 0
-    scanned = 0
     throttle = Throttle()
 
-    def _emit(sub: ProgressReporter | None) -> None:
-        if sub is None:
-            return
-        sub.report(
-            scanned, total,
-            f"queued {len(keep)}, resolved {resolved}",
-        )
+    with connection() as conn:
+        max_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM attachments").fetchone()[0]
+        max_id = int(max_id) or 1  # avoid div-by-zero in the bar
 
-    scan_ctx = (
-        progress.sub("Pre-scan attachments", total)
-        if progress is not None
-        else _null_scope()
-    )
-    with scan_ctx as sub:
-        with connection() as conn:
-            while True:
-                rows = conn.execute(
-                    chunk_sql, [*base_args, last_id, _SCAN_CHUNK],
-                ).fetchall()
-                if not rows:
-                    break
-                for r in rows:
-                    last_id = r["id"]
-                    scanned += 1
-                    status = r["download_status"]
-                    if status == STATUS_OK or status == STATUS_SKIPPED:
-                        resolved += 1
-                        continue
-                    keep.append(r)
-                if throttle(scanned, total):
-                    _emit(sub)
-                if sub is not None:
-                    sub.check_cancelled()
-        _emit(sub)
+        if progress is not None:
+            progress.report(0, max_id, "Pre-scan…")
+
+        while True:
+            rows = conn.execute(
+                chunk_sql, [last_id, *base_args, _SCAN_CHUNK],
+            ).fetchall()
+            if not rows:
+                break
+            for r in rows:
+                last_id = r["id"]
+                status = r["download_status"]
+                if status == STATUS_OK or status == STATUS_SKIPPED:
+                    resolved += 1
+                    continue
+                keep.append(r)
+            if progress is not None and throttle(last_id, max_id):
+                progress.report(
+                    last_id, max_id,
+                    f"pre-scan · queued {len(keep)} · resolved {resolved}",
+                )
+                progress.check_cancelled()
+
+    if progress is not None:
+        progress.report(
+            max_id, max_id,
+            f"pre-scan done · queued {len(keep)} · resolved {resolved}",
+        )
 
     keep.sort(key=_strategy_sort_key(strategy))
     return keep, resolved
@@ -345,11 +327,6 @@ def _strategy_sort_key(strategy: str):
         )
     # newest-first (default)
     return lambda r: (-r["message_id"], -r["id"])
-
-
-@contextmanager
-def _null_scope() -> Iterator[None]:
-    yield None
 
 
 # ---------- async core ----------

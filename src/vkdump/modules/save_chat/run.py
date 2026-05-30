@@ -395,7 +395,7 @@ def _render_chat(
         if photo_mentions else "n/a"
     )
     progress.log(
-        f"save-chat: photos — {photo_inlined} of {photo_mentions} mentions inlined"
+        f"save-chat: photos — {photo_inlined} of {photo_mentions} photos inlined"
         f" ({photo_pct}) · backed by {photo_unique} unique local file(s)"
     )
 

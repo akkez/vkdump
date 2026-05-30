@@ -38,6 +38,7 @@ from ...parsers.vk.pages import is_message_page_filename, list_message_pages
 from ...parsers.vk.sources import join as source_join
 from .index import find_slug_for_chat, upsert as upsert_index
 from .pipeline import AttMeta, TransformContext, apply_pipeline
+from .photos_page import render as render_photos_page
 from .transforms import DEFAULT_TRANSFORMS
 
 
@@ -399,6 +400,14 @@ def _render_chat(
         f" ({photo_pct}) · backed by {photo_unique} unique local file(s)"
     )
 
+    photos_page_name, photos_count = render_photos_page(
+        chat_meta, ctx, first_page=first_page_name or None,
+    )
+    if photos_page_name:
+        progress.log(
+            f"save-chat: gallery — {photos_count} photo(s) → {photos_page_name}"
+        )
+
     manifest = upsert_index(
         output_dir=output_dir,
         chat_slug=chat_slug,
@@ -408,6 +417,8 @@ def _render_chat(
         message_count=int(chat_meta["message_count"] or 0),
         first_page=f"messages/{first_page_name}" if first_page_name else "",
         chat_id=int(chat_meta["id"]),
+        photos_page=photos_page_name or "",
+        photos_count=photos_count,
     )
     progress.log(
         f"save-chat: wrote {chat_out} · index now lists {len(manifest.chats)} chat(s)"
@@ -431,6 +442,9 @@ def _render_chat(
             round(photo_inlined / photo_mentions * 100, 1)
             if photo_mentions else None
         ),
+        # Gallery page summary.
+        "photos_page": photos_page_name or "",
+        "photos_count": photos_count,
     }
 
 

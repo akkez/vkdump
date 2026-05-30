@@ -69,6 +69,27 @@ def _link_asset(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
+def materialise_photo_asset(src: Path, year: str, ctx: TransformContext) -> Path:
+    """Hardlink/copy a downloaded photo into the chat's asset tree.
+
+    Shared by the inline-into-messages transform and the separate
+    photos-gallery page so both flows place files at the same path
+    (`assets/<year>/photos/<sha[:2]>/<basename>`) and the dedup map in
+    `ctx.copied_assets` covers both callers. Returns the absolute on-disk
+    path; callers compute their own relpath because the inline pages
+    live one level deeper (`messages/`) than `photos.html`.
+    """
+    already = ctx.copied_assets.get(src)
+    if already is not None:
+        return already
+    bucket = src.stem[:2] if len(src.stem) >= 2 else "_"
+    rel = Path("assets") / year / "photos" / bucket / src.name
+    dst = ctx.output_chat_dir / rel
+    _link_asset(src, dst)
+    ctx.copied_assets[src] = dst
+    return dst
+
+
 class InlinePhotosTransform:
     """For every photo attachment with a successful local download,
     insert a `<img>` tag right before the original `<a class="attachment__link">`
@@ -120,22 +141,12 @@ class InlinePhotosTransform:
 
     @staticmethod
     def _materialise_asset(src: Path, year: str, ctx: TransformContext) -> str:
-        """Copy/link `src` into the chat's asset tree, return the href
-        the rendered page should use — relative to `pages_dir` (where
-        the messagesN.html files live), POSIX-style. Since pages sit
-        at `<chat>/messages/`, that gives `../assets/<year>/...`.
+        """Place `src` under `assets/` and return a POSIX href relative
+        to `pages_dir` (the `messages/` subfolder), so injected tags
+        keep the same `../assets/<year>/…` shape regardless of the
+        chat's slug.
         """
-        already = ctx.copied_assets.get(src)
-        if already is None:
-            # enrich.py names files <sha[:16]>.<ext>; the bucket is the
-            # first two hex chars, same convention as data/static/.
-            bucket = src.stem[:2] if len(src.stem) >= 2 else "_"
-            rel = Path("assets") / year / "photos" / bucket / src.name
-            dst = ctx.output_chat_dir / rel
-            _link_asset(src, dst)
-            ctx.copied_assets[src] = dst
-        else:
-            dst = already
+        dst = materialise_photo_asset(src, year, ctx)
         return os.path.relpath(dst, ctx.pages_dir).replace(os.sep, "/")
 
     @staticmethod

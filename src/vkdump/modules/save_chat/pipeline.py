@@ -40,6 +40,10 @@ class TransformContext:
     # the path under output_chat_dir we wrote it to. Lets the renderer
     # dedupe identical assets (same URL across many messages → one file).
     copied_assets: dict[Path, Path] = field(default_factory=dict)
+    # Per-attachment injection counters, keyed by kind. Each transform
+    # bumps these when it actually changes the page HTML — the
+    # orchestrator turns them into the end-of-run match-rate summary.
+    injected_by_kind: dict[str, int] = field(default_factory=dict)
     log: Callable[[str], None] = lambda _msg: None
 
 

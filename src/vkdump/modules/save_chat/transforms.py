@@ -66,7 +66,15 @@ class InlinePhotosTransform:
             if not src.is_file():
                 continue
             asset_rel = self._materialise_asset(src, year, ctx)
+            before = new_html
             new_html = self._inject(new_html, att, asset_rel)
+            if new_html is not before:
+                # Per-attachment hit — feeds the end-of-run summary so
+                # the user sees "M of N photos inlined" rather than
+                # just block-level counts.
+                ctx.injected_by_kind[KIND_PHOTO] = (
+                    ctx.injected_by_kind.get(KIND_PHOTO, 0) + 1
+                )
         if new_html is not msg.raw_html:
             msg.raw_html = new_html
         return msg

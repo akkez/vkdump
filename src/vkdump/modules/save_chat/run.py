@@ -371,16 +371,26 @@ def _render_chat(
     # itself (free, no extra DB scan), so this is instant on big chats.
     # Photo-only for now — when video/audio enrich lands the same dict
     # gains new keys without any rewrite here.
-    photo_candidates = ctx.candidates_by_kind.get("photo", 0)
-    photo_downloaded = len(ctx.url_to_local)
-    photo_injected = ctx.injected_by_kind.get("photo", 0)
+    #
+    # The three numbers live in different units, which used to confuse
+    # readers (inlined > unique-downloaded looks impossible at first
+    # glance):
+    #   - mentions: per-attachment occurrences in messages — a single
+    #               photo forwarded 5 times counts as 5
+    #   - inlined:  same per-attachment unit, how many of those mentions
+    #               got a local <img> tag written
+    #   - unique:   distinct URLs with a local file on disk (deduped) —
+    #               a forwarded photo at the same URL is 1 file
+    photo_mentions = ctx.candidates_by_kind.get("photo", 0)
+    photo_inlined = ctx.injected_by_kind.get("photo", 0)
+    photo_unique = len(ctx.url_to_local)
     photo_pct = (
-        f"{(photo_injected / photo_candidates * 100):.1f}%"
-        if photo_candidates else "n/a"
+        f"{(photo_inlined / photo_mentions * 100):.1f}%"
+        if photo_mentions else "n/a"
     )
     progress.log(
-        f"save-chat: photos — {photo_injected} inlined / {photo_downloaded} downloaded"
-        f" / {photo_candidates} candidates · {photo_pct} in export"
+        f"save-chat: photos — {photo_inlined} of {photo_mentions} mentions inlined"
+        f" ({photo_pct}) · backed by {photo_unique} unique local file(s)"
     )
 
     manifest = upsert_index(
@@ -406,12 +416,14 @@ def _render_chat(
         "output_dir": str(output_dir),
         "chat_dir": str(chat_out),
         "assets_copied": len(ctx.copied_assets),
-        "photo_candidates": photo_candidates,
-        "photo_downloaded": photo_downloaded,
-        "photo_injected": photo_injected,
+        # Per-attachment mention counts (a photo forwarded N times = N).
+        "photo_mentions": photo_mentions,
+        "photo_inlined": photo_inlined,
+        # Distinct URLs backed by a downloaded local file (deduped).
+        "photo_unique_files": photo_unique,
         "photo_match_pct": (
-            round(photo_injected / photo_candidates * 100, 1)
-            if photo_candidates else None
+            round(photo_inlined / photo_mentions * 100, 1)
+            if photo_mentions else None
         ),
     }
 

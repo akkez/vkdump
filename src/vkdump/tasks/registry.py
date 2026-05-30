@@ -1,5 +1,27 @@
-from ..modules import parse_dump, enrich, stats
+from ..modules import enrich, parse_dump, save_chat, stats
 from .spec import ParamSpec, TaskSpec
+
+
+def _last_parse_dump_source() -> str | None:
+    """Prefill save-chat's `source` field with whatever path the user
+    last fed to parse-dump. Falls back to nothing if app_config doesn't
+    have it (e.g. the user hasn't run parse-dump from this install yet).
+    """
+    from ..core import app_config
+    return app_config.get("save_chat.last_source") or app_config.get("parse_dump.last_source")
+
+
+def _last_save_chat_output() -> str | None:
+    from ..core import app_config
+    return app_config.get("save_chat.last_output")
+
+
+def _chat_picker_choices() -> list[tuple[str, str]]:
+    """Same list as the enrich scope picker, but without the 'All chats'
+    sentinel — save-chat renders one chat at a time, so an empty pick
+    is a hard error rather than a useful default.
+    """
+    return [opt for opt in _chat_scope_choices() if opt[0] != ""]
 
 
 def _chat_scope_choices() -> list[tuple[str, str]]:
@@ -116,6 +138,39 @@ TASKS: list[TaskSpec] = [
         description="Brief summary: chats, users, messages, attachments by kind, top chats / senders, parse errors.",
         params=[],
         run=stats.run,
+    ),
+    TaskSpec(
+        name="save-chat",
+        title="Save chat",
+        description=(
+            "Render one chat's original HTML into a portable folder, with"
+            " locally-downloaded photos inlined alongside the original"
+            " links. Re-export updates the same output dir's index in place."
+        ),
+        params=[
+            ParamSpec(
+                name="source",
+                type="path_any",
+                label="Dump source",
+                help="Same VK dump you fed to parse-dump (ZIP or extracted folder).",
+                default_provider=_last_parse_dump_source,
+            ),
+            ParamSpec(
+                name="chat",
+                type="choice",
+                label="Chat",
+                help="Which chat to render. Type to filter.",
+                choices_provider=_chat_picker_choices,
+            ),
+            ParamSpec(
+                name="output",
+                type="dir",
+                label="Output folder",
+                help="Folder where the per-chat subfolder + index.html will live. Reused across runs.",
+                default_provider=_last_save_chat_output,
+            ),
+        ],
+        run=save_chat.run,
     ),
 ]
 

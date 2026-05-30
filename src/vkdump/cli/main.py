@@ -196,6 +196,30 @@ def stats_cmd() -> None:
     _run("stats", {})
 
 
+@app.command("save-chat")
+def save_chat_cmd(
+    source: Annotated[
+        Path,
+        typer.Argument(
+            help="The same VK dump (ZIP or extracted) you fed to parse-dump.",
+        ),
+    ],
+    chat: Annotated[
+        str,
+        typer.Argument(help="peer_id of the chat to render (see `vkdump stats`)."),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option(
+            "--output", "-o",
+            help="Folder where per-chat subfolders + index.html will live. Reused across runs.",
+        ),
+    ],
+) -> None:
+    """Render one chat's HTML with locally-downloaded photos inlined."""
+    _run("save-chat", {"source": source, "chat": chat, "output": output})
+
+
 @db_app.command("migrate")
 def db_migrate_cmd() -> None:
     """Apply pending SQL migrations."""

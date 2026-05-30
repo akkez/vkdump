@@ -89,11 +89,6 @@ def run(params: dict, progress: ProgressReporter) -> dict:
             f"enrich-media: unknown strategy {strategy!r}, falling back to {DEFAULT_STRATEGY!r}"
         )
         strategy = DEFAULT_STRATEGY
-    skipped_unsupported = _mark_unsupported_urls(kinds)
-    if skipped_unsupported:
-        progress.log(
-            f"enrich-media: skipped {skipped_unsupported} on-site vk.com photo URLs"
-        )
     rows, resolved = _pick_rows(
         kinds, chat_scope=chat_scope, strategy=strategy, progress=progress,
     )
@@ -165,30 +160,44 @@ def run(params: dict, progress: ProgressReporter) -> dict:
 # ---------- DB selection ----------
 
 
-def _mark_unsupported_urls(kinds: tuple[str, ...]) -> int:
-    """Re-stamp on-site vk.com photo rows as 'skipped' regardless of
-    their current status (so prior 'failed' attempts from older code
-    don't keep cluttering `vkdump logs downloads`).
+def _mark_vk_skipped_in_range(
+    conn: sqlite3.Connection, id_lo: int, id_hi: int | None
+) -> int:
+    """Stamp on-site vk.com photo rows as 'skipped' in `(id_lo, id_hi]`
+    (or `id_lo..end` when `id_hi is None`). Called from inside the
+    pre-scan loop so each write is bounded to the chunk's id range
+    instead of one upfront full-table UPDATE that used to stall the
+    worker thread for ~700 ms before the bar moved.
 
-    The actual queue-time exclusion lives in :func:`_pick_rows`; this
-    only normalises the persisted state.
+    Cosmetic: the pre-scan SELECT already filters vk.com URLs out of
+    the download queue regardless of their status. This just normalises
+    `vkdump logs downloads` so they show as 'skipped' instead of NULL.
     """
-    if not kinds or "photo" not in kinds:
-        return 0
-    with connection() as conn:
+    if id_hi is not None:
         cur = conn.execute(
-            """
-            UPDATE attachments
-               SET download_status = ?,
-                   download_attempted_at = CURRENT_TIMESTAMP,
-                   download_error = ?
-             WHERE kind = 'photo'
-               AND url LIKE 'https://vk.com/%'
-               AND download_status != ?
-            """,
-            (STATUS_SKIPPED, "on-site vk.com URL", STATUS_SKIPPED),
+            "UPDATE attachments"
+            "   SET download_status = ?,"
+            "       download_attempted_at = CURRENT_TIMESTAMP,"
+            "       download_error = ?"
+            " WHERE id > ? AND id <= ?"
+            "   AND kind = 'photo'"
+            "   AND url LIKE 'https://vk.com/%'"
+            "   AND (download_status IS NULL OR download_status != ?)",
+            (STATUS_SKIPPED, "on-site vk.com URL", id_lo, id_hi, STATUS_SKIPPED),
         )
-        return cur.rowcount or 0
+    else:
+        cur = conn.execute(
+            "UPDATE attachments"
+            "   SET download_status = ?,"
+            "       download_attempted_at = CURRENT_TIMESTAMP,"
+            "       download_error = ?"
+            " WHERE id > ?"
+            "   AND kind = 'photo'"
+            "   AND url LIKE 'https://vk.com/%'"
+            "   AND (download_status IS NULL OR download_status != ?)",
+            (STATUS_SKIPPED, "on-site vk.com URL", id_lo, STATUS_SKIPPED),
+        )
+    return cur.rowcount or 0
 
 
 def _pick_rows(
@@ -266,6 +275,8 @@ def _pick_rows(
     keep: list[sqlite3.Row] = []
     resolved = 0
     last_id = 0
+    vk_marked = 0
+    mark_vk = "photo" in kinds
     throttle = Throttle()
 
     with connection() as conn:
@@ -276,8 +287,9 @@ def _pick_rows(
             progress.report(0, max_id, "Pre-scan…")
 
         while True:
+            range_lo = last_id
             rows = conn.execute(
-                chunk_sql, [last_id, *base_args, _SCAN_CHUNK],
+                chunk_sql, [range_lo, *base_args, _SCAN_CHUNK],
             ).fetchall()
             if not rows:
                 break
@@ -288,6 +300,11 @@ def _pick_rows(
                     resolved += 1
                     continue
                 keep.append(r)
+            # Inline the vk.com cosmetic mark for the id range we just
+            # walked. Bounded by (range_lo, last_id] so each write is
+            # small even on a multi-million-row table.
+            if mark_vk:
+                vk_marked += _mark_vk_skipped_in_range(conn, range_lo, last_id)
             if progress is not None and throttle(last_id, max_id):
                 progress.report(
                     last_id, max_id,
@@ -295,6 +312,15 @@ def _pick_rows(
                 )
                 progress.check_cancelled()
 
+        # Tail: catch vk.com rows past the last matched id (chunk SELECT
+        # excludes vk.com so it never advances `last_id` past them).
+        if mark_vk:
+            vk_marked += _mark_vk_skipped_in_range(conn, last_id, None)
+
+    if vk_marked and progress is not None:
+        progress.log(
+            f"enrich-media: marked {vk_marked} on-site vk.com photo URLs as skipped"
+        )
     if progress is not None:
         progress.report(
             max_id, max_id,

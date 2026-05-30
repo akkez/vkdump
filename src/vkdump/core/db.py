@@ -1,13 +1,104 @@
 import sqlite3
 import sys
 import threading
+import time
+import traceback
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from loguru import logger
 
 from .settings import get_settings
+
+
+# ---------- optional per-call SQL tracing ----------
+
+
+def _short_caller() -> str:
+    """Walk the stack and return the first frame outside this file as
+    'module.py:line in func'. Used by the SQL-debug wrapper so log lines
+    name the call site, not our wrapper internals.
+    """
+    here = __file__
+    for frame in reversed(traceback.extract_stack()[:-2]):
+        if frame.filename != here:
+            mod = Path(frame.filename).name
+            return f"{mod}:{frame.lineno} in {frame.name}"
+    return "?"
+
+
+class _TracingCursor:
+    """Proxy around a real sqlite3.Cursor that times each fetch call.
+
+    SELECT timing matters most: `Connection.execute()` only *prepares*
+    the statement; the heavy lifting happens when the caller iterates
+    or calls fetchall/fetchone/fetchmany, so we time those too.
+    """
+
+    __slots__ = ("_real", "_sql", "_t_open")
+
+    def __init__(self, real: sqlite3.Cursor, sql: str, t_open: float) -> None:
+        self._real = real
+        self._sql = sql
+        self._t_open = t_open
+
+    def _log(self, op: str, started: float, extra: str = "") -> None:
+        dt = (time.perf_counter() - started) * 1000
+        sql_one_line = " ".join(self._sql.split())[:200]
+        logger.debug(f"[sql {op:>9} {dt:7.1f}ms]{extra} {sql_one_line}")
+
+    def fetchall(self) -> list[Any]:
+        t = time.perf_counter()
+        rows = self._real.fetchall()
+        self._log("fetchall", t, f" rows={len(rows)}")
+        return rows
+
+    def fetchone(self) -> Any:
+        t = time.perf_counter()
+        row = self._real.fetchone()
+        self._log("fetchone", t)
+        return row
+
+    def fetchmany(self, size: int | None = None) -> list[Any]:
+        t = time.perf_counter()
+        rows = self._real.fetchmany(size) if size is not None else self._real.fetchmany()
+        self._log("fetchmany", t, f" rows={len(rows)}")
+        return rows
+
+    def __iter__(self) -> Iterator[Any]:
+        t = time.perf_counter()
+        n = 0
+        for row in self._real:
+            n += 1
+            yield row
+        self._log("iter", t, f" rows={n}")
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+class _TracingConnection(sqlite3.Connection):
+    """sqlite3.Connection subclass that logs every execute/executemany
+    with timing. Activated by passing as `factory=` to `sqlite3.connect`
+    when `Settings.sql_debug` is on.
+    """
+
+    def execute(self, sql: str, *args: Any) -> _TracingCursor:  # type: ignore[override]
+        t = time.perf_counter()
+        cur = super().execute(sql, *args)
+        dt = (time.perf_counter() - t) * 1000
+        one_line = " ".join(sql.split())[:200]
+        logger.debug(f"[sql   prepare {dt:7.1f}ms] {_short_caller()} | {one_line}")
+        return _TracingCursor(cur, sql, t)
+
+    def executemany(self, sql: str, *args: Any) -> _TracingCursor:  # type: ignore[override]
+        t = time.perf_counter()
+        cur = super().executemany(sql, *args)
+        dt = (time.perf_counter() - t) * 1000
+        one_line = " ".join(sql.split())[:200]
+        logger.debug(f"[sql executemany {dt:7.1f}ms] {_short_caller()} | {one_line}")
+        return _TracingCursor(cur, sql, t)
 
 
 class CancelHandle:
@@ -116,7 +207,8 @@ def connection() -> Iterator[sqlite3.Connection]:
     """
     db_path = resolve_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES)
+    factory = _TracingConnection if get_settings().sql_debug else sqlite3.Connection
+    conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES, factory=factory)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     cancel = _current_cancel()

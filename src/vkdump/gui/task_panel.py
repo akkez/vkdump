@@ -1,11 +1,12 @@
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QThreadPool, QTimer, Signal
+from PySide6.QtCore import Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QCompleter,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -223,6 +224,22 @@ class TaskPanel(QWidget):
                 idx = cb.findData(str(p.default))
                 if idx >= 0:
                     cb.setCurrentIndex(idx)
+            if len(opts) > 10:
+                cb.setEditable(True)
+                cb.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+                completer = QCompleter(cb.model(), cb)
+                completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+                completer.setFilterMode(Qt.MatchFlag.MatchContains)
+                completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+                cb.setCompleter(completer)
+                line = cb.lineEdit()
+                if line is not None:
+                    line.setPlaceholderText("Type to filter…")
+                # When focus leaves the edit, snap text back to the current
+                # selection so a half-typed query doesn't linger visually.
+                def _resync(_cb=cb) -> None:
+                    _cb.setCurrentIndex(_cb.currentIndex())
+                cb.lineEdit().editingFinished.connect(_resync)
             return cb
         line = QLineEdit()
         if p.default is not None:

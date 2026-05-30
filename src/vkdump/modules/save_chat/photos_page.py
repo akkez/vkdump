@@ -3,10 +3,13 @@ shows every successfully-downloaded photo for the chat, ordered by
 date. Sibling to (not replacement for) the inline-into-messages
 transform — they share the same `assets/` tree via `copied_assets`.
 
-Layout: photos grouped into year sections; within a year a CSS-columns
-masonry keeps native aspect ratios without horizontal alignment forcing
-neighbours to crop or stretch. No JS — the page works offline as plain
-HTML.
+Layout: photos grouped into year sections (latest year first, latest
+photo first inside it). Each section renders a server-balanced masonry
+of `_N_COLUMNS` fixed columns: the next-by-date photo always lands in
+whichever column currently has the smallest sum of aspect ratios
+(`height / width`), so all six columns grow at roughly the same speed
+instead of one column finishing while the others idle. No JS — the page
+works offline as plain HTML.
 """
 from __future__ import annotations
 
@@ -29,6 +32,14 @@ _PHOTOS_PAGE = "photos.html"
 # Tolerant of stray whitespace / case so backfills with slightly
 # different shape still parse.
 _RES_RE = re.compile(r"^\s*(\d+)\s*[xX×]\s*(\d+)\s*$")
+
+# Fixed bucket count. 6 reads well on a typical wide-screen monitor;
+# narrower viewports get each column scaled down by `flex: 1 1 0`
+# rather than re-balanced. Balancing is a one-pass O(n·k) greedy.
+_N_COLUMNS = 6
+# Fallback aspect when the photo has no resolution stored — assume
+# square so unknown-size items don't all pile into one column.
+_UNKNOWN_ASPECT = 1.0
 
 
 @dataclass(frozen=True)
@@ -85,8 +96,11 @@ def render(
 
 
 def _fetch_photos(chat_id: int) -> list[tuple]:
-    """All ok'd photo attachments for a chat, ordered by message time
-    then by attachment position within the message. One DB pass.
+    """All ok'd photo attachments for a chat, newest first. One DB pass.
+
+    Reverse-chronological so a casual visitor sees the freshest pic at
+    the top of the page; year sections downstream stay grouped because
+    DESC sort still keeps contiguous-by-year runs together.
     """
     with connection() as conn:
         cur = conn.execute(
@@ -98,7 +112,7 @@ def _fetch_photos(chat_id: int) -> list[tuple]:
             "   AND a.kind = ?"
             "   AND a.download_status = 'ok'"
             "   AND a.local_path IS NOT NULL"
-            " ORDER BY m.sent_at ASC, a.position ASC",
+            " ORDER BY m.sent_at DESC, a.position DESC",
             (chat_id, KIND_PHOTO),
         )
         return cur.fetchall()
@@ -114,9 +128,9 @@ def _parse_resolution(raw: str | None) -> tuple[int | None, int | None]:
 
 
 def _group_by_year(photos: list[_Photo]) -> list[tuple[str, list[_Photo]]]:
-    """Preserve the incoming chronological order while bucketing into
-    contiguous year groups. Plain dict preservation works since the
-    source query is ORDER BY sent_at.
+    """Preserve the incoming ordering while bucketing into contiguous
+    year groups. Caller passes photos already sorted by `sent_at DESC`,
+    so the resulting groups read latest-year-first.
     """
     out: list[tuple[str, list[_Photo]]] = []
     current_year: str | None = None
@@ -132,6 +146,33 @@ def _group_by_year(photos: list[_Photo]) -> list[tuple[str, list[_Photo]]]:
     if bucket:
         out.append((current_year or "unknown", bucket))
     return out
+
+
+def _distribute_into_columns(
+    photos: list[_Photo], n_cols: int = _N_COLUMNS,
+) -> list[list[_Photo]]:
+    """Greedy shortest-column-first masonry packing. Input order is
+    preserved within each column (so the page still reads newest-first
+    top-down per column), but the next photo always lands in whichever
+    column currently has the smallest summed aspect ratio. Result:
+    six columns of roughly equal height, no laggard column.
+
+    Weight = `height / width`. For images of unknown resolution we
+    use `_UNKNOWN_ASPECT` so they don't accidentally collapse the
+    heuristic (`weight = 0` would make every unknown-size pic land in
+    the same column).
+    """
+    cols: list[list[_Photo]] = [[] for _ in range(n_cols)]
+    weights = [0.0] * n_cols
+    for p in photos:
+        if p.width and p.height and p.width > 0:
+            w = p.height / p.width
+        else:
+            w = _UNKNOWN_ASPECT
+        idx = min(range(n_cols), key=lambda j: weights[j])
+        cols[idx].append(p)
+        weights[idx] += w
+    return cols
 
 
 def _fmt_caption(p: _Photo) -> str:
@@ -166,32 +207,37 @@ def _render_html(
     )
     body_parts: list[str] = []
     for year, items in sections:
+        cols = _distribute_into_columns(items)
         body_parts.append(
             f'<section class="year" id="y{html_escape(year, quote=True)}">'
             f'<h2>{html_escape(year)} '
             f'<span class="count">· {html_escape(plural(len(items), "photo"))}</span></h2>'
             '<div class="gallery">'
         )
-        for p in items:
-            href = html_escape(p.href, quote=True)
-            caption = html_escape(_fmt_caption(p))
-            # Pre-declaring intrinsic size lets the browser reserve the
-            # right aspect-ratio slot before the JPEG bytes arrive, so
-            # the column doesn't reflow as images stream in. Drops to a
-            # plain auto-height <img> when resolution is unknown.
-            size_attrs = (
-                f' width="{p.width}" height="{p.height}"'
-                if p.width and p.height else ""
-            )
-            body_parts.append(
-                '<figure>'
-                f'<a href="{href}">'
-                f'<img loading="lazy" decoding="async"'
-                f' src="{href}" alt=""{size_attrs}>'
-                '</a>'
-                f'<figcaption>{caption}</figcaption>'
-                '</figure>'
-            )
+        for col in cols:
+            body_parts.append('<div class="col">')
+            for p in col:
+                href = html_escape(p.href, quote=True)
+                caption = html_escape(_fmt_caption(p))
+                # Pre-declaring intrinsic size lets the browser reserve
+                # the aspect-ratio slot before the JPEG bytes arrive, so
+                # the column doesn't reflow as images stream in. Drops
+                # to a plain auto-height <img> when resolution is
+                # unknown.
+                size_attrs = (
+                    f' width="{p.width}" height="{p.height}"'
+                    if p.width and p.height else ""
+                )
+                body_parts.append(
+                    '<figure>'
+                    f'<a href="{href}">'
+                    f'<img loading="lazy" decoding="async"'
+                    f' src="{href}" alt=""{size_attrs}>'
+                    '</a>'
+                    f'<figcaption>{caption}</figcaption>'
+                    '</figure>'
+                )
+            body_parts.append('</div>')
         body_parts.append('</div></section>')
 
     total = len(photos)
@@ -228,13 +274,13 @@ main{padding:16px 24px 64px}
 section.year{margin-bottom:24px;scroll-margin-top:120px}
 section.year h2{margin:8px 0 12px;font-size:16px;color:#444;font-weight:600}
 section.year h2 .count{color:#999;font-weight:400;font-size:12px}
-.gallery{column-count:6;column-gap:8px}
-@media (max-width:1700px){.gallery{column-count:5}}
-@media (max-width:1400px){.gallery{column-count:4}}
-@media (max-width:1100px){.gallery{column-count:3}}
-@media (max-width:760px){.gallery{column-count:2}}
-@media (max-width:480px){.gallery{column-count:1}}
-.gallery figure{break-inside:avoid;margin:0 0 8px;background:#fff;border:1px solid #eee;border-radius:4px;overflow:hidden;text-align:center}
+/* Six fixed flex columns side-by-side. Distribution into columns
+   happens server-side (`_distribute_into_columns`) so adjacent photos
+   from different columns don't drift apart as CSS-columns balancing
+   would do. Each `.col` keeps its own vertical stack with `gap`. */
+.gallery{display:flex;gap:8px;align-items:flex-start}
+.gallery .col{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:8px}
+.gallery figure{margin:0;background:#fff;border:1px solid #eee;border-radius:4px;overflow:hidden;text-align:center}
 .gallery a{display:block;line-height:0}
 /* Intrinsic-size cap: tiny pics keep their native pixels instead of
    being stretched to fill the column. max-width clamps wide ones to

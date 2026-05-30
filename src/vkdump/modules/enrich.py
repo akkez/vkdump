@@ -90,6 +90,24 @@ def run(params: dict, progress: ProgressReporter) -> dict:
             f"enrich-media: unknown strategy {strategy!r}, falling back to {DEFAULT_STRATEGY!r}"
         )
         strategy = DEFAULT_STRATEGY
+
+    # Persist this run's effective inputs so the form auto-prefills
+    # them next time (GUI or CLI). Stored under enrich_media.last_*
+    # in app_config; matching default_providers in the registry pick
+    # them back up.
+    try:
+        from ..core import app_config
+        # kinds normalises through _coerce_kinds: accept either a list
+        # or a comma-separated string; we write the comma form so the
+        # GUI text field (which feeds back a string) round-trips.
+        app_config.set("enrich_media.last_kinds", ",".join(kinds))
+        app_config.set("enrich_media.last_chat_scope", chat_scope or "")
+        app_config.set("enrich_media.last_strategy", strategy)
+        app_config.set("enrich_media.last_concurrency", str(concurrency))
+        app_config.set("enrich_media.last_per_host", str(per_host))
+        app_config.set("enrich_media.last_timeout", str(timeout_s))
+    except Exception:  # noqa: BLE001
+        pass
     rows, resolved = _pick_rows(
         kinds, chat_scope=chat_scope, strategy=strategy, progress=progress,
     )

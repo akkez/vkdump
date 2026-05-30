@@ -1,5 +1,19 @@
+from typing import Callable
+
 from ..modules import enrich, parse_dump, save_chat, stats
 from .spec import ParamSpec, TaskSpec
+
+
+def _remember(key: str) -> Callable[[], str | None]:
+    """Tiny factory for `default_provider`s that just read one
+    `app_config` key — avoids a wall of near-identical helpers when a
+    task wants every field to round-trip.
+    """
+    def provider() -> str | None:
+        from ..core import app_config
+        return app_config.get(key)
+    provider.__name__ = f"_last_{key.replace('.', '_')}"
+    return provider
 
 
 def _last_parse_dump_source() -> str | None:
@@ -121,6 +135,7 @@ TASKS: list[TaskSpec] = [
                 help="Comma-separated kinds to download. Default: photo.",
                 required=False,
                 default="photo",
+                default_provider=_remember("enrich_media.last_kinds"),
             ),
             ParamSpec(
                 name="chat_scope",
@@ -130,6 +145,7 @@ TASKS: list[TaskSpec] = [
                 required=False,
                 default="",
                 choices_provider=_chat_scope_choices,
+                default_provider=_remember("enrich_media.last_chat_scope"),
             ),
             ParamSpec(
                 name="strategy",
@@ -145,6 +161,7 @@ TASKS: list[TaskSpec] = [
                     ("dms-first", "DMs first"),
                     ("my-uploads-first", "My uploads first"),
                 ],
+                default_provider=_remember("enrich_media.last_strategy"),
             ),
             ParamSpec(
                 name="concurrency",
@@ -153,6 +170,7 @@ TASKS: list[TaskSpec] = [
                 help="Total in-flight requests across all hosts.",
                 required=False,
                 default=16,
+                default_provider=_remember("enrich_media.last_concurrency"),
             ),
             ParamSpec(
                 name="per_host",
@@ -161,6 +179,7 @@ TASKS: list[TaskSpec] = [
                 help="Max in-flight requests to any one CDN subdomain.",
                 required=False,
                 default=8,
+                default_provider=_remember("enrich_media.last_per_host"),
             ),
             ParamSpec(
                 name="timeout",
@@ -169,6 +188,7 @@ TASKS: list[TaskSpec] = [
                 help="Per-request total timeout.",
                 required=False,
                 default=20,
+                default_provider=_remember("enrich_media.last_timeout"),
             ),
         ],
         run=enrich.run,

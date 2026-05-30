@@ -107,17 +107,27 @@ def _attach_searchable_combo(cb: "QComboBox") -> None:
         )
         sys.stderr.flush()
 
+    # Mutable closure state. `last_highlighted` is the most recent
+    # popup-highlighted item text (from completer.highlighted) —
+    # *this* is what the user is visually pointing at after arrowing
+    # through the popup. Qt's `completer.currentCompletion()` does NOT
+    # track arrow-key navigation in the popup — it stays on the first
+    # filtered item, which is what caused the "wrong text lands on
+    # Enter" bug. `committing` guards against reentrant commit loops.
+    state = {"last_highlighted": None, "committing": False}
+
     def _commit_exact(text: str, *, tag: str = "") -> bool:
         if not text:
             _dbg(f"commit_skip:{tag}", reason="empty")
+            return False
+        if state["committing"]:
+            _dbg(f"commit_skip:{tag}", reason="reentrant")
             return False
         idx = cb.findText(text, Qt.MatchFlag.MatchExactly)
         if idx < 0:
             _dbg(f"commit_miss:{tag}", text=text)
             return False
-        # Block signals while we sync the line edit so we don't
-        # re-trigger editingFinished / textEdited / etc., which used
-        # to cascade into a snap-back that wiped the pick.
+        state["committing"] = True
         was = cb.blockSignals(True)
         line.blockSignals(True)
         try:
@@ -126,39 +136,47 @@ def _attach_searchable_combo(cb: "QComboBox") -> None:
         finally:
             line.blockSignals(False)
             cb.blockSignals(was)
+            state["committing"] = False
         _dbg(f"commit_ok:{tag}", idx=idx, text=text)
         return True
 
     def _on_text_edited(text: str) -> None:
+        # New typing invalidates any stale popup highlight from before.
+        state["last_highlighted"] = None
         # Keep the popup open as the user types — without this, the
-        # popup can vanish after a backspace and `currentCompletion()`
-        # returns nothing, which is what caused the wrong-text-on-Enter
-        # symptom (we fell through to the snap-back instead).
+        # popup can vanish after a backspace.
         _dbg("textEdited", text=text)
         completer.complete()
 
+    def _on_highlighted(text: str) -> None:
+        # Arrow-key (or hover) moved the highlight in the popup —
+        # remember it so Enter picks *this* item, not the
+        # first-filtered one Qt's currentCompletion() insists on.
+        _dbg("highlighted", text=text)
+        state["last_highlighted"] = text
+
     def _on_activated(text: str) -> None:
+        # Fires on mouse click in popup. With our explicit
+        # returnPressed handler this also fires after Enter, but with
+        # the post-commit text, so the call is a no-op then.
         _dbg("activated", text=text)
         _commit_exact(text, tag="activated")
 
-    def _on_highlighted(text: str) -> None:
-        _dbg("highlighted", text=text)
-
     def _on_return() -> None:
         _dbg("returnPressed")
-        # Prefer the highlighted popup row (what the user just arrowed
-        # to). Falls back to the first popup match if nothing was
-        # arrowed but text was typed.
-        text = completer.currentCompletion()
-        if not text and completer.completionCount() > 0:
-            completer.setCurrentRow(0)
-            text = completer.currentCompletion()
-        if text and _commit_exact(text, tag="return"):
+        # 1. Latest popup highlight wins (arrow+Enter, auto-highlighted
+        #    first match + Enter without arrows — both go via the
+        #    completer.highlighted signal).
+        hi = state["last_highlighted"]
+        if hi and _commit_exact(hi, tag="return_highlighted"):
             return
-        # No popup match at all — try the line edit text as a literal,
-        # else keep the previous selection visually.
-        if not _commit_exact(line.text().strip(), tag="return_literal"):
-            _commit_exact(cb.itemText(cb.currentIndex()), tag="return_revert")
+        # 2. Line edit text taken literally — covers the case where
+        #    the popup hasn't surfaced anything (e.g. user pasted a
+        #    full item text and hit Enter).
+        if _commit_exact(line.text().strip(), tag="return_literal"):
+            return
+        # 3. Last resort: snap back visually to the current selection.
+        _commit_exact(cb.itemText(cb.currentIndex()), tag="return_revert")
 
     def _on_editing_finished() -> None:
         _dbg("editingFinished")
@@ -168,13 +186,12 @@ def _attach_searchable_combo(cb: "QComboBox") -> None:
         text = line.text().strip()
         if not text:
             return
-        idx = cb.findText(text, Qt.MatchFlag.MatchExactly)
-        if idx < 0:
+        if cb.findText(text, Qt.MatchFlag.MatchExactly) < 0:
             _commit_exact(cb.itemText(cb.currentIndex()), tag="finish_revert")
 
     line.textEdited.connect(_on_text_edited)
-    completer.activated.connect(_on_activated)
     completer.highlighted.connect(_on_highlighted)
+    completer.activated.connect(_on_activated)
     line.returnPressed.connect(_on_return)
     line.editingFinished.connect(_on_editing_finished)
     _dbg("attached", n_items=cb.count())

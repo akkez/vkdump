@@ -144,7 +144,12 @@ class InlinePhotosTransform:
         m = pat.search(html)
         if m is None:
             return html
-        alt = html_escape(_build_alt(att.description, meta), quote=True)
+        label = _build_alt(att.description, meta)
+        alt = html_escape(label, quote=True)
+        # `title` mirrors alt so hovering the image surfaces the
+        # metadata; alt itself only renders when the image fails to
+        # load, which is rarely what the user wants to read.
+        title = alt
         href = html_escape(asset_href, quote=True)
         # Block-level wrapper with inline styles so we don't depend on
         # VK's own CSS: description/link in VK markup is inline, so
@@ -154,8 +159,8 @@ class InlinePhotosTransform:
         tag = (
             '<div class="vkdump-inline-photo"'
             ' style="display:block;margin:6px 0">'
-            f'<a href="{href}" style="display:inline-block">'
-            f'<img loading="lazy" src="{href}" alt="{alt}"'
+            f'<a href="{href}" title="{title}" style="display:inline-block">'
+            f'<img loading="lazy" src="{href}" alt="{alt}" title="{title}"'
             ' style="display:block;max-width:100%;height:auto">'
             '</a>'
             '</div>'

@@ -25,7 +25,9 @@ import sqlite3
 import ssl
 import time
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 import aiohttp
 import certifi
@@ -45,6 +47,10 @@ DEFAULT_PER_HOST = 8
 DEFAULT_TIMEOUT = 20  # seconds per request
 DEFAULT_KINDS: tuple[str, ...] = ("photo",)
 MIN_VALID_BYTES = 128
+# Pre-scan chunk size. Keyset-paginating by a.id in this many rows at a
+# time keeps any single SQL round-trip short on multi-million-row tables,
+# so progress can tick smoothly instead of stalling on one giant SELECT.
+_SCAN_CHUNK = 10000
 
 STATUS_OK = "ok"
 STATUS_FAILED = "failed"
@@ -90,7 +96,9 @@ def run(params: dict, progress: ProgressReporter) -> dict:
         progress.log(
             f"enrich-media: skipped {skipped_unsupported} on-site vk.com photo URLs"
         )
-    rows, resolved = _pick_rows(kinds, chat_scope=chat_scope, strategy=strategy)
+    rows, resolved = _pick_rows(
+        kinds, chat_scope=chat_scope, strategy=strategy, progress=progress,
+    )
     if not rows:
         progress.log(
             f"enrich-media: nothing to download for kinds={list(kinds)} "
@@ -187,24 +195,36 @@ def _pick_rows(
     kinds: tuple[str, ...],
     chat_scope: str | None = None,
     strategy: str = DEFAULT_STRATEGY,
+    progress: ProgressReporter | None = None,
 ) -> tuple[list[sqlite3.Row], int]:
     """Pick attachments that still need fetching.
 
-    Filters at the SQL level by:
+    Chunked, keyset-paginated scan: walks rows in ascending `a.id` order
+    in `_SCAN_CHUNK`-sized batches, reporting against a precomputed
+    COUNT(*) via `progress.sub()`. Avoids a single huge ORDER BY on
+    multi-million-row tables and keeps the UI thread visibly fed.
+
+    File existence is **not** checked here. Rows already at status='ok'
+    are trusted and excluded from the queue; if a file vanished, a manual
+    re-run with status reset is required to re-queue it. This trades a
+    less self-healing resume for skipping millions of stat() calls on
+    big mirrors. Status='skipped' rows are likewise excluded.
+
+    Sort by `strategy` happens in Python after the scan. The keep-list
+    is typically the unresolved tail (small), so an in-memory sort there
+    is much cheaper than a SQL ORDER BY across every candidate.
+
+    Filters (same as before, but enforced per chunk):
 
     - kind ∈ `kinds`
     - URL present
     - URL is **not** `https://vk.com/...` — those are on-site links that
       need auth / redirect handling, we don't ever want them in the
       queue regardless of their stored status.
-    - `download_status` is **not** 'skipped' — explicit skips stay out
-      until the user re-queues them by hand.
     - If `chat_scope` is set: restrict to attachments from messages
       whose chat has that `peer_id`.
 
-    `strategy` controls ordering only — every queued attachment still
-    gets downloaded eventually. The tiebreaker for the chat-type and
-    my-uploads strategies is `m.id DESC` (newest first):
+    Strategies (Python sort):
 
     - "newest-first":     `messages.id DESC` — the default.
     - "oldest-first":     `messages.id ASC`.
@@ -212,74 +232,124 @@ def _pick_rows(
     - "dms-first":        `chats.type = 'dm'` first.
     - "my-uploads-first": `messages.sender_is_self = 1` first.
 
-    Among the remaining rows, those at status='ok' whose `local_path`
-    is still present on disk are dropped in Python; rows whose file
-    vanished get rescheduled.
-
-    Returns `(rows_to_do, resolved_count)`. `resolved_count` is the
-    number of in-scope attachments that the SQL filter already
-    excluded as either status='skipped' or status='ok' with a file on
-    disk — caller uses it to seed the progress bar so a resumed run
-    starts at the right percent instead of "1 / <remaining>".
+    Returns `(rows_to_do, resolved_count)`. `resolved_count` is the number
+    of in-scope candidates excluded as status ∈ {'ok','skipped'} so the
+    bar can resume at the right percent.
     """
     if not kinds:
         return [], 0
     placeholders = ",".join("?" * len(kinds))
-    static_root = _static_root()
 
     needs_chats = chat_scope is not None or strategy in ("groups-first", "dms-first")
     chat_join = " JOIN chats c ON c.id = m.chat_id" if needs_chats else ""
+    chat_select = ", c.type AS chat_type" if needs_chats else ""
     scope_clause = " AND c.peer_id = ?" if chat_scope is not None else ""
 
-    # messages always joined now — every strategy orders by m.id, either
-    # directly (newest/oldest-first) or as the within-tier tiebreaker.
-    # `skipped` rows are pulled too (so they can be counted toward
-    # `resolved`) and partitioned out in Python below.
-    sql = f"""
-    SELECT a.id, a.kind, a.url, a.local_path, a.download_status
-      FROM attachments a
-      JOIN messages m ON m.id = a.message_id
-      {chat_join}
-     WHERE a.kind IN ({placeholders})
-       AND a.url IS NOT NULL
-       AND a.url != ''
-       AND a.url NOT LIKE 'https://vk.com/%'
-       {scope_clause}
-    """
-    args: list = [*kinds]
-    if chat_scope is not None:
-        args.append(chat_scope)
+    base_where = (
+        f" WHERE a.kind IN ({placeholders})"
+        " AND a.url IS NOT NULL AND a.url != ''"
+        " AND a.url NOT LIKE 'https://vk.com/%'"
+        f"{scope_clause}"
+    )
+    count_sql = (
+        "SELECT COUNT(*) FROM attachments a"
+        " JOIN messages m ON m.id = a.message_id"
+        f"{chat_join}"
+        f"{base_where}"
+    )
+    chunk_sql = (
+        "SELECT a.id, a.kind, a.url, a.local_path, a.download_status,"
+        " m.id AS message_id, m.sender_is_self"
+        f"{chat_select}"
+        " FROM attachments a"
+        " JOIN messages m ON m.id = a.message_id"
+        f"{chat_join}"
+        f"{base_where} AND a.id > ?"
+        " ORDER BY a.id ASC LIMIT ?"
+    )
 
-    if strategy == "newest-first":
-        sql += " ORDER BY m.id DESC, a.id DESC"
-    elif strategy == "oldest-first":
-        sql += " ORDER BY m.id ASC, a.id ASC"
-    elif strategy == "groups-first":
-        sql += " ORDER BY (c.type = 'group_chat') DESC, m.id DESC, a.id DESC"
-    elif strategy == "dms-first":
-        sql += " ORDER BY (c.type = 'dm') DESC, m.id DESC, a.id DESC"
-    elif strategy == "my-uploads-first":
-        sql += " ORDER BY m.sender_is_self DESC, m.id DESC, a.id DESC"
+    base_args: list = [*kinds]
+    if chat_scope is not None:
+        base_args.append(chat_scope)
 
     with connection() as conn:
-        candidates = conn.execute(sql, args).fetchall()
-    out: list[sqlite3.Row] = []
+        total = int(conn.execute(count_sql, base_args).fetchone()[0])
+
+    if total == 0:
+        return [], 0
+
+    keep: list[sqlite3.Row] = []
     resolved = 0
-    for r in candidates:
-        status = r["download_status"]
-        if status == STATUS_SKIPPED:
-            # Permanent skip (e.g. on-site vk.com URL); never retried,
-            # but counts toward the denominator.
-            resolved += 1
-            continue
-        if status == STATUS_OK:
-            local = r["local_path"]
-            if local and (static_root / local).is_file():
-                resolved += 1
-                continue
-            # File vanished — retry.
-        out.append(r)
-    return out, resolved
+    last_id = 0
+    scanned = 0
+    throttle = Throttle()
+
+    def _emit(sub: ProgressReporter | None) -> None:
+        if sub is None:
+            return
+        sub.report(
+            scanned, total,
+            f"queued {len(keep)}, resolved {resolved}",
+        )
+
+    scan_ctx = (
+        progress.sub("Pre-scan attachments", total)
+        if progress is not None
+        else _null_scope()
+    )
+    with scan_ctx as sub:
+        with connection() as conn:
+            while True:
+                rows = conn.execute(
+                    chunk_sql, [*base_args, last_id, _SCAN_CHUNK],
+                ).fetchall()
+                if not rows:
+                    break
+                for r in rows:
+                    last_id = r["id"]
+                    scanned += 1
+                    status = r["download_status"]
+                    if status == STATUS_OK or status == STATUS_SKIPPED:
+                        resolved += 1
+                        continue
+                    keep.append(r)
+                if throttle(scanned, total):
+                    _emit(sub)
+                if sub is not None:
+                    sub.check_cancelled()
+        _emit(sub)
+
+    keep.sort(key=_strategy_sort_key(strategy))
+    return keep, resolved
+
+
+def _strategy_sort_key(strategy: str):
+    """Build a sort key matching the SQL ORDER BY the old `_pick_rows`
+    used. Negate ints to flip ascending → descending; chat_type / sender
+    flags become 0/1 bucket prefixes so the strategy-tier wins, with
+    `message_id DESC, attachment_id DESC` as the tiebreaker.
+    """
+    if strategy == "oldest-first":
+        return lambda r: (r["message_id"], r["id"])
+    if strategy == "groups-first":
+        return lambda r: (
+            0 if r["chat_type"] == "group_chat" else 1, -r["message_id"], -r["id"],
+        )
+    if strategy == "dms-first":
+        return lambda r: (
+            0 if r["chat_type"] == "dm" else 1, -r["message_id"], -r["id"],
+        )
+    if strategy == "my-uploads-first":
+        return lambda r: (
+            0 if r["sender_is_self"] else 1, -r["message_id"], -r["id"],
+        )
+    # newest-first (default)
+    return lambda r: (-r["message_id"], -r["id"])
+
+
+@contextmanager
+def _null_scope() -> Iterator[None]:
+    yield None
 
 
 # ---------- async core ----------

@@ -43,6 +43,98 @@ class _ClickyLineEdit(QLineEdit):
             self.clicked_when_empty.emit()
 
 
+def _attach_searchable_combo(cb: "QComboBox") -> None:
+    """Turn a populated `QComboBox` into a type-to-filter picker.
+
+    The wiring is finicky because three handlers all fire on Enter and
+    used to race each other, leaving the line edit showing one thing
+    while `currentIndex` pointed at another. This version is explicit:
+
+    * The popup is forced open whenever the user types — Firefox-like
+      filter behaviour instead of relying on Qt's "show on Nth keystroke"
+      heuristics that depended on focus order.
+    * On Enter, we look at the completer's *currently highlighted*
+      completion (the thing the popup is showing as selected after the
+      user arrowed through it), find the matching combobox row by
+      EXACT text, and set currentIndex. If nothing is highlighted (user
+      typed but didn't arrow), we accept the first popup match.
+    * On focus-out with text that doesn't match any item exactly, we
+      revert the visible text to the current selection — but only then,
+      so a successful pick from the popup never gets snapped back.
+    """
+    cb.setEditable(True)
+    cb.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+    completer = QCompleter(cb.model(), cb)
+    completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+    completer.setFilterMode(Qt.MatchFlag.MatchContains)
+    completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+    cb.setCompleter(completer)
+    line = cb.lineEdit()
+    if line is None:
+        return
+    line.setPlaceholderText("Type to filter…")
+
+    def _commit_exact(text: str) -> bool:
+        if not text:
+            return False
+        idx = cb.findText(text, Qt.MatchFlag.MatchExactly)
+        if idx < 0:
+            return False
+        # Block signals while we sync the line edit so we don't
+        # re-trigger editingFinished / textEdited / etc., which used
+        # to cascade into a snap-back that wiped the pick.
+        was = cb.blockSignals(True)
+        line.blockSignals(True)
+        try:
+            cb.setCurrentIndex(idx)
+            line.setText(text)
+        finally:
+            line.blockSignals(False)
+            cb.blockSignals(was)
+        return True
+
+    def _on_text_edited(_text: str) -> None:
+        # Keep the popup open as the user types — without this, the
+        # popup can vanish after a backspace and `currentCompletion()`
+        # returns nothing, which is what caused the wrong-text-on-Enter
+        # symptom (we fell through to the snap-back instead).
+        completer.complete()
+
+    def _on_activated(text: str) -> None:
+        _commit_exact(text)
+
+    def _on_return() -> None:
+        # Prefer the highlighted popup row (what the user just arrowed
+        # to). Falls back to the first popup match if nothing was
+        # arrowed but text was typed.
+        text = completer.currentCompletion()
+        if not text and completer.completionCount() > 0:
+            completer.setCurrentRow(0)
+            text = completer.currentCompletion()
+        if text and _commit_exact(text):
+            return
+        # No popup match at all — try the line edit text as a literal,
+        # else keep the previous selection visually.
+        if not _commit_exact(line.text().strip()):
+            _commit_exact(cb.itemText(cb.currentIndex()))
+
+    def _on_editing_finished() -> None:
+        # Only snap back if the visible text genuinely doesn't match
+        # any item — picks via popup/Enter already updated currentIndex
+        # so this is a no-op for them.
+        text = line.text().strip()
+        if not text:
+            return
+        idx = cb.findText(text, Qt.MatchFlag.MatchExactly)
+        if idx < 0:
+            _commit_exact(cb.itemText(cb.currentIndex()))
+
+    line.textEdited.connect(_on_text_edited)
+    completer.activated.connect(_on_activated)
+    line.returnPressed.connect(_on_return)
+    line.editingFinished.connect(_on_editing_finished)
+
+
 def _resolve_default(p: ParamSpec) -> Any:
     """Pick the value to seed an editor with at form-build time. The
     `default_provider` callback wins when present (so a task can
@@ -330,41 +422,7 @@ class TaskPanel(QWidget):
                 if idx >= 0:
                     cb.setCurrentIndex(idx)
             if len(opts) > 10:
-                cb.setEditable(True)
-                cb.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-                completer = QCompleter(cb.model(), cb)
-                completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-                completer.setFilterMode(Qt.MatchFlag.MatchContains)
-                completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
-                cb.setCompleter(completer)
-                line = cb.lineEdit()
-                if line is not None:
-                    line.setPlaceholderText("Type to filter…")
-
-                def _pick(text: str, _cb=cb) -> None:
-                    idx = _cb.findText(text)
-                    if idx >= 0:
-                        _cb.setCurrentIndex(idx)
-
-                def _on_return(_cb=cb, _comp=completer) -> None:
-                    # Prefer the highlighted completion; fall back to the
-                    # first popup match so partial-text + Enter still works.
-                    txt = _comp.currentCompletion()
-                    if not txt and _comp.completionCount() > 0:
-                        _comp.setCurrentRow(0)
-                        txt = _comp.currentCompletion()
-                    if txt:
-                        _pick(txt)
-                    else:
-                        _cb.setCurrentIndex(_cb.currentIndex())
-
-                completer.activated.connect(_pick)
-                line.returnPressed.connect(_on_return)
-                # Focus-loss snap-back: discard half-typed garbage by
-                # reverting the displayed text to the current selection.
-                line.editingFinished.connect(
-                    lambda _cb=cb: _cb.setCurrentIndex(_cb.currentIndex())
-                )
+                _attach_searchable_combo(cb)
             return cb
         line = QLineEdit()
         if initial is not None:

@@ -108,6 +108,23 @@ def run(params: dict, progress: ProgressReporter) -> dict:
         app_config.set("enrich_media.last_timeout", str(timeout_s))
     except Exception:  # noqa: BLE001
         pass
+
+    # One-shot backfill: pre-scan skips OK rows, so anything enriched
+    # before the resolution column landed never reaches _fetch_one and
+    # keeps NULL resolution. Run the URL→size regex over them once here
+    # via a SQLite user-function — single UPDATE, idempotent (re-runs
+    # find zero NULL rows and no-op).
+    if "photo" in kinds:
+        try:
+            n_filled = _backfill_resolutions_from_url()
+            if n_filled:
+                progress.log(
+                    f"enrich-media: backfilled resolution for {n_filled} "
+                    f"already-OK row(s) via URL regex"
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("enrich-media: resolution backfill failed: {}", exc)
+
     rows, resolved = _pick_rows(
         kinds, chat_scope=chat_scope, strategy=strategy, progress=progress,
     )
@@ -658,6 +675,33 @@ def _resolution_from_url(url: str | None) -> str | None:
     if m is None:
         return None
     return f"{m.group(1)}x{m.group(2)}"
+
+
+def _backfill_resolutions_from_url() -> int:
+    """Sweep OK photo rows whose `resolution` is still NULL and try to
+    extract it from the URL once. Runs as a single UPDATE with a
+    Python-side user function registered on the connection — no per-row
+    round-trips, no fetch, no decode pass. Returns the rowcount.
+
+    Idempotent: subsequent calls UPDATE nothing because
+    `resolution IS NULL` no longer matches the same rows.
+    """
+    with connection() as conn:
+        # `create_function(name, narg, fn)` exposes `fn` as a scalar
+        # SQL function on this connection only — perfect scope-limit
+        # for a one-off bulk operation. `deterministic=True` lets
+        # SQLite skip per-row re-invocation if the optimizer can prove
+        # it (irrelevant here but cheap to set).
+        conn.create_function("vk_url_size", 1, _resolution_from_url, deterministic=True)
+        cur = conn.execute(
+            "UPDATE attachments"
+            "   SET resolution = vk_url_size(url)"
+            " WHERE download_status = 'ok'"
+            "   AND resolution IS NULL"
+            "   AND url IS NOT NULL"
+            "   AND vk_url_size(url) IS NOT NULL"
+        )
+        return cur.rowcount or 0
 
 
 def _parse_http_date(raw: str | None) -> float | None:

@@ -26,8 +26,17 @@ from ...parsers.vk.models import KIND_PHOTO
 from .pipeline import TransformContext
 from .transforms import materialise_photo_asset
 
-_PHOTOS_PAGE = "photos.html"
-_PER_SENDER_PREFIX = "photos-"
+# Pages live under `<chat>/gallery/` so the chat root stays at two
+# entries (`messages/` + `gallery/`) regardless of how many senders the
+# chat has — otherwise a 50-person group chat litters the folder with
+# 50+ `photos-*.html` files. The link surfaced from the top-level index
+# is `gallery/` (folder URL — browsers serve `index.html` from inside).
+_GALLERY_DIR = "gallery"
+_MAIN_FILE = "index.html"
+# Value persisted in `_export.json::photos_page` and used by the
+# top-level index to link to a chat's gallery. Folder-style so it
+# survives even if we ever rename `index.html` inside `gallery/`.
+_GALLERY_LINK = f"{_GALLERY_DIR}/"
 # Length cap on the sender-name portion of the per-sender filename.
 # The trailing `-<vk_id>` segment is always appended so collisions on
 # the same display name (and on truncations) are still disambiguated.
@@ -75,19 +84,22 @@ def render(
     ctx: TransformContext,
     first_page: str | None = None,
 ) -> tuple[str | None, int]:
-    """Write `<chat>/photos.html` plus one `photos-<sender-slug>.html`
-    per sender who contributed at least one downloaded photo.
+    """Write `<chat>/gallery/index.html` plus one `<slug>.html` per
+    sender who contributed at least one downloaded photo.
 
-    `first_page` is the basename of the first rendered messages file
-    (e.g. `messages0.html`); when present, every gallery page's
+    Lives under `gallery/` so the chat root keeps its two-entry shape
+    (`messages/`, `gallery/`) regardless of how many senders the chat
+    has. `first_page` is the basename of the first rendered messages
+    file (e.g. `messages0.html`); when present, every gallery page's
     back-link points straight at it, otherwise it falls back to the
-    parent export index. Returns `(main_filename, total_photo_count)`;
-    `main_filename` is `None` when the chat has zero usable photos and
+    parent export index. Returns `(folder_link, total_photo_count)`;
+    `folder_link` is `None` when the chat has zero usable photos and
     every page was skipped.
     """
     rows = _fetch_photos(chat_meta["id"])
     if not rows:
         return None, 0
+    gallery_dir = ctx.output_chat_dir / _GALLERY_DIR
     photos: list[_Photo] = []
     for sent_at, local_path, resolution, description, file_size, sender_vk_id, sender_display_name in rows:
         src = ctx.static_root / local_path
@@ -95,7 +107,10 @@ def render(
             continue
         year = str(sent_at.year) if sent_at else "unknown"
         dst = materialise_photo_asset(src, year, ctx)
-        href = os.path.relpath(dst, ctx.output_chat_dir).replace(os.sep, "/")
+        # Hrefs are computed relative to `gallery/` since every emitted
+        # HTML file lives there; assets are one level up, so the result
+        # is `../assets/<year>/photos/...`.
+        href = os.path.relpath(dst, gallery_dir).replace(os.sep, "/")
         w, h = _parse_resolution(resolution)
         photos.append(_Photo(
             href=href,
@@ -111,14 +126,13 @@ def render(
         return None, 0
 
     senders = _build_senders(photos)
-    out_dir = ctx.output_chat_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
+    gallery_dir.mkdir(parents=True, exist_ok=True)
 
     main_html = _render_html(
         chat_meta, photos, senders,
         current=None, first_page=first_page,
     )
-    (out_dir / _PHOTOS_PAGE).write_text(main_html, encoding="utf-8")
+    (gallery_dir / _MAIN_FILE).write_text(main_html, encoding="utf-8")
 
     for sender in senders:
         filtered = [p for p in photos if p.sender_vk_id == sender.vk_id]
@@ -126,9 +140,9 @@ def render(
             chat_meta, filtered, senders,
             current=sender, first_page=first_page,
         )
-        (out_dir / _sender_filename(sender)).write_text(page_html, encoding="utf-8")
+        (gallery_dir / _sender_filename(sender)).write_text(page_html, encoding="utf-8")
 
-    return _PHOTOS_PAGE, len(photos)
+    return _GALLERY_LINK, len(photos)
 
 
 def _fetch_photos(chat_id: int) -> list[tuple]:
@@ -168,7 +182,7 @@ def _sender_slug(display_name: str | None, vk_id: int) -> str:
 
 
 def _sender_filename(sender: _Sender) -> str:
-    return f"{_PER_SENDER_PREFIX}{sender.slug}.html"
+    return f"{sender.slug}.html"
 
 
 def _build_senders(photos: list[_Photo]) -> list[_Sender]:
@@ -284,9 +298,12 @@ def _render_html(
     title = html_escape(page_subject)
     chat_title_html = html_escape(chat_title)
     sections = _group_by_year(photos)
+    # Pages live one level deep (`<chat>/gallery/`), so back-links climb
+    # an extra `../` to reach the chat root (or two for the export
+    # index at the output root).
     back_href, back_label = (
-        (f"messages/{html_escape(first_page, quote=True)}", "← messages")
-        if first_page else ("../index.html", "← all chats")
+        (f"../messages/{html_escape(first_page, quote=True)}", "← messages")
+        if first_page else ("../../index.html", "← all chats")
     )
     year_links = " ".join(
         f'<a href="#y{html_escape(y, quote=True)}">{html_escape(y)}'
@@ -294,11 +311,11 @@ def _render_html(
         for y, items in sections
     )
     sender_links_parts: list[str] = []
-    # "Everyone" anchor: always points back to photos.html, marked
-    # active when the current view is the unfiltered main page.
+    # "Everyone" anchor: always points back to the gallery's main page,
+    # marked active when the current view is the unfiltered one.
     all_active = ' class="active"' if current is None else ""
     sender_links_parts.append(
-        f'<a{all_active} href="{_PHOTOS_PAGE}">everyone'
+        f'<a{all_active} href="{_MAIN_FILE}">everyone'
         f' <span class="count">({len(photos) if current is None else sum(s.count for s in senders)})</span></a>'
     )
     for s in senders:

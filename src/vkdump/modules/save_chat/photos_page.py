@@ -34,9 +34,11 @@ from .transforms import materialise_photo_asset
 _GALLERY_DIR = "gallery"
 _MAIN_FILE = "index.html"
 # Value persisted in `_export.json::photos_page` and used by the
-# top-level index to link to a chat's gallery. Folder-style so it
-# survives even if we ever rename `index.html` inside `gallery/`.
-_GALLERY_LINK = f"{_GALLERY_DIR}/"
+# top-level index to link to a chat's gallery. Explicit path to
+# `gallery/index.html` because the export is browsed off the local
+# filesystem via `file://` — folder URLs there show a directory
+# listing instead of auto-loading `index.html`.
+_GALLERY_LINK = f"{_GALLERY_DIR}/{_MAIN_FILE}"
 # Length cap on the sender-name portion of the per-sender filename.
 # The trailing `-<vk_id>` segment is always appended so collisions on
 # the same display name (and on truncations) are still disambiguated.

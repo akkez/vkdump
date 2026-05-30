@@ -235,11 +235,31 @@ class TaskPanel(QWidget):
                 line = cb.lineEdit()
                 if line is not None:
                     line.setPlaceholderText("Type to filter…")
-                # When focus leaves the edit, snap text back to the current
-                # selection so a half-typed query doesn't linger visually.
-                def _resync(_cb=cb) -> None:
-                    _cb.setCurrentIndex(_cb.currentIndex())
-                cb.lineEdit().editingFinished.connect(_resync)
+
+                def _pick(text: str, _cb=cb) -> None:
+                    idx = _cb.findText(text)
+                    if idx >= 0:
+                        _cb.setCurrentIndex(idx)
+
+                def _on_return(_cb=cb, _comp=completer) -> None:
+                    # Prefer the highlighted completion; fall back to the
+                    # first popup match so partial-text + Enter still works.
+                    txt = _comp.currentCompletion()
+                    if not txt and _comp.completionCount() > 0:
+                        _comp.setCurrentRow(0)
+                        txt = _comp.currentCompletion()
+                    if txt:
+                        _pick(txt)
+                    else:
+                        _cb.setCurrentIndex(_cb.currentIndex())
+
+                completer.activated.connect(_pick)
+                line.returnPressed.connect(_on_return)
+                # Focus-loss snap-back: discard half-typed garbage by
+                # reverting the displayed text to the current selection.
+                line.editingFinished.connect(
+                    lambda _cb=cb: _cb.setCurrentIndex(_cb.currentIndex())
+                )
             return cb
         line = QLineEdit()
         if p.default is not None:

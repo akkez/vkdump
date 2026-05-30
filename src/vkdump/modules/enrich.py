@@ -315,10 +315,17 @@ def _pick_rows(
 
     keep: list[sqlite3.Row] = []
     resolved = 0
+    revived = 0
     last_id = 0
     vk_marked = 0
     mark_vk = "photo" in kinds
     throttle = Throttle()
+    # Verify ok rows still have their file on disk during the scan —
+    # otherwise the user wiping `data/static/` (manually or via a
+    # half-failed disk-full enrich) leaves stale ok status that
+    # silently sinks every downstream attempt to use the file.
+    # is_file() is ~µs; doing it per chunk keeps the burst bounded.
+    static_root = _static_root()
 
     with connection() as conn:
         max_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM attachments").fetchone()[0]
@@ -337,9 +344,18 @@ def _pick_rows(
             for r in rows:
                 last_id = r["id"]
                 status = r["download_status"]
-                if status == STATUS_OK or status == STATUS_SKIPPED:
+                if status == STATUS_SKIPPED:
                     resolved += 1
                     continue
+                if status == STATUS_OK:
+                    local = r["local_path"]
+                    if local and (static_root / local).is_file():
+                        resolved += 1
+                        continue
+                    # DB says ok but the file is gone — re-queue. The
+                    # downloader stamps status=ok again on a successful
+                    # refetch; until then this row reverts to "to do".
+                    revived += 1
                 keep.append(r)
             # Inline the vk.com cosmetic mark for the id range we just
             # walked. Bounded by (range_lo, last_id] so each write is
@@ -361,6 +377,11 @@ def _pick_rows(
     if vk_marked and progress is not None:
         progress.log(
             f"enrich-media: marked {vk_marked} on-site vk.com photo URLs as skipped"
+        )
+    if revived and progress is not None:
+        progress.log(
+            f"enrich-media: re-queued {plural(revived, 'attachment')}"
+            f" whose ok-status file is missing on disk"
         )
     if progress is not None:
         progress.report(

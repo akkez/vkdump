@@ -127,6 +127,12 @@ class InlinePhotosTransform:
                 continue
             src = ctx.static_root / meta.local_path
             if not src.is_file():
+                # DB lied — row is 'ok' but the file isn't on disk.
+                # Surface this in the summary so the user sees how
+                # much of the gap is "never downloaded" vs "vanished".
+                ctx.missing_on_disk_by_kind[KIND_PHOTO] = (
+                    ctx.missing_on_disk_by_kind.get(KIND_PHOTO, 0) + 1
+                )
                 continue
             asset_rel = self._materialise_asset(src, year, ctx)
             before = new_html

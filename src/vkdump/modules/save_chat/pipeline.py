@@ -61,6 +61,11 @@ class TransformContext:
     # blocking the worker for seconds on big chats.
     candidates_by_kind: dict[str, int] = field(default_factory=dict)
     injected_by_kind: dict[str, int] = field(default_factory=dict)
+    # DB row said download_status='ok' but the file is gone from disk.
+    # Bumped per-occurrence so a chat where most photos vanished
+    # (manual cleanup, disk-full mid-download, etc.) surfaces in the
+    # summary instead of silently skipping inject.
+    missing_on_disk_by_kind: dict[str, int] = field(default_factory=dict)
     log: Callable[[str], None] = lambda _msg: None
 
 

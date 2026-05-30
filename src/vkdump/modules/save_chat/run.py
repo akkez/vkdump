@@ -391,6 +391,7 @@ def _render_chat(
     #               a forwarded photo at the same URL is 1 file
     photo_mentions = ctx.candidates_by_kind.get("photo", 0)
     photo_inlined = ctx.injected_by_kind.get("photo", 0)
+    photo_missing = ctx.missing_on_disk_by_kind.get("photo", 0)
     photo_unique = len(ctx.url_to_meta)
     photo_pct = (
         f"{(photo_inlined / photo_mentions * 100):.1f}%"
@@ -400,6 +401,16 @@ def _render_chat(
         f"save-chat: photos — {photo_inlined} of {photo_mentions} photos inlined"
         f" ({photo_pct}) · backed by {plural(photo_unique, 'unique local file')}"
     )
+    if photo_missing:
+        # Loud one-liner — almost always means a stale ok-status row
+        # (file wiped from data/static/, partial enrich, disk-full, …).
+        # The fix is to reset those rows' status and re-run enrich.
+        progress.log(
+            f"save-chat: WARNING — {plural(photo_missing, 'attachment')} had"
+            " download_status='ok' in DB but the file is missing on disk;"
+            " they were skipped. Re-run enrich-media after resetting status"
+            " on those rows to refetch."
+        )
 
     photos_page_name, photos_count = render_photos_page(
         chat_meta, ctx, first_page=first_page_name or None,
@@ -437,6 +448,9 @@ def _render_chat(
         # Per-attachment mention counts (a photo forwarded N times = N).
         "photo_mentions": photo_mentions,
         "photo_inlined": photo_inlined,
+        # Mentions where the DB row was status='ok' but the file wasn't
+        # on disk — diagnostic, surfaces wiped/partial enrich state.
+        "photo_missing_on_disk": photo_missing,
         # Distinct URLs backed by a downloaded local file (deduped).
         "photo_unique_files": photo_unique,
         "photo_match_pct": (

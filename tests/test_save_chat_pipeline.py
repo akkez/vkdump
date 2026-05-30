@@ -139,6 +139,29 @@ def test_photo_without_local_file_is_skipped(ctx: TransformContext) -> None:
     assert changed == 0
     assert "vkdump-inline-photo" not in new_html
     assert "never-downloaded.jpg" in new_html
+    # URL not in url_to_meta at all → counted as candidate only.
+    assert ctx.candidates_by_kind.get("photo") == 1
+    assert ctx.injected_by_kind.get("photo", 0) == 0
+    assert ctx.missing_on_disk_by_kind.get("photo", 0) == 0
+
+
+def test_db_ok_but_disk_missing_bumps_missing_counter(ctx: TransformContext) -> None:
+    """The exact production failure mode the user hit: DB row claims
+    download_status='ok' (so it's in url_to_meta), but the file is gone
+    from data/static. Inject silently bails; the missing-on-disk
+    counter has to make the gap visible in the summary."""
+    url = "https://cdn.example.com/gone.jpg?size=999x999"
+    ctx.url_to_meta[url] = AttMeta(
+        local_path="photo/zz/zz99zz99zz99zz99.jpg",  # never created on disk
+        resolution="999x999",
+        file_size=1234,
+    )
+    body = _photo_attachment(url)
+    html = _page([_msg_block(42, "Вы, 1 янв 2024 в 12:00:00", body)])
+    _transform_page(html, "t.html", ctx)
+    assert ctx.candidates_by_kind.get("photo") == 1
+    assert ctx.injected_by_kind.get("photo", 0) == 0
+    assert ctx.missing_on_disk_by_kind.get("photo") == 1
 
 
 def test_vk_com_urls_skipped_even_if_in_url_to_meta(ctx: TransformContext, tmp_path: Path) -> None:

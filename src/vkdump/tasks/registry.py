@@ -3,10 +3,18 @@ from .spec import ParamSpec, TaskSpec
 
 
 def _last_parse_dump_source() -> str | None:
-    """Prefill save-chat's `source` field with whatever path the user
-    last fed to parse-dump. Falls back to nothing if app_config doesn't
-    have it (e.g. the user hasn't run parse-dump from this install yet).
-    """
+    """Pre-fill parse-dump's source field with the path used on the
+    previous run. parse-dump writes its own key, so this is the
+    primary signal; save-chat's mirror only kicks in for the first
+    open if save-chat ran before parse-dump (rare but harmless)."""
+    from ..core import app_config
+    return app_config.get("parse_dump.last_source")
+
+
+def _last_save_chat_source() -> str | None:
+    """save-chat reuses the parse-dump source by default — both tasks
+    point at the same VK dump. If the user explicitly set a different
+    source via save-chat (e.g. a separate snapshot), that one wins."""
     from ..core import app_config
     return app_config.get("save_chat.last_source") or app_config.get("parse_dump.last_source")
 
@@ -64,6 +72,7 @@ TASKS: list[TaskSpec] = [
                 type="path_any",
                 label="Dump source",
                 help="A VK dump: ZIP archive, archive root folder, messages/ folder, single chat folder, or a single HTML file.",
+                default_provider=_last_parse_dump_source,
             ),
         ],
         run=parse_dump.run,
@@ -133,13 +142,6 @@ TASKS: list[TaskSpec] = [
         run=enrich.run,
     ),
     TaskSpec(
-        name="stats",
-        title="Stats",
-        description="Brief summary: chats, users, messages, attachments by kind, top chats / senders, parse errors.",
-        params=[],
-        run=stats.run,
-    ),
-    TaskSpec(
         name="save-chat",
         title="Save chat",
         description=(
@@ -153,7 +155,7 @@ TASKS: list[TaskSpec] = [
                 type="path_any",
                 label="Dump source",
                 help="Same VK dump you fed to parse-dump (ZIP or extracted folder).",
-                default_provider=_last_parse_dump_source,
+                default_provider=_last_save_chat_source,
             ),
             ParamSpec(
                 name="chat",
@@ -171,6 +173,13 @@ TASKS: list[TaskSpec] = [
             ),
         ],
         run=save_chat.run,
+    ),
+    TaskSpec(
+        name="stats",
+        title="Stats",
+        description="Brief summary: chats, users, messages, attachments by kind, top chats / senders, parse errors.",
+        params=[],
+        run=stats.run,
     ),
 ]
 

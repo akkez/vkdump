@@ -1,8 +1,27 @@
-from PySide6.QtWidgets import QMainWindow, QMessageBox, QTabWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..tasks.registry import TASKS
 from .results_dialog import StatsView
 from .task_panel import TaskPanel
+
+
+def _make_settings_placeholder() -> QWidget:
+    w = QWidget()
+    layout = QVBoxLayout(w)
+    label = QLabel("Settings will live here.")
+    label.setStyleSheet("color: #888; padding: 32px;")
+    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    layout.addWidget(label)
+    layout.addStretch(1)
+    return w
 
 
 class MainWindow(QMainWindow):
@@ -27,6 +46,10 @@ class MainWindow(QMainWindow):
                 panel = TaskPanel(task)
                 self._task_panels.append(panel)
                 self._tabs.addTab(panel, task.title)
+        # GUI-only Settings tab: not backed by a TaskSpec, lives at the
+        # very end, currently a stub. Will host things like default
+        # paths / DB location / theme switcher once those features land.
+        self._tabs.addTab(_make_settings_placeholder(), "Settings")
 
         # Lazy-start the rollups: don't touch the DB until the user
         # actually opens the Stats tab. Free side-effect — if they

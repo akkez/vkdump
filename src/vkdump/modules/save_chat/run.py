@@ -235,25 +235,6 @@ def _build_url_map(chat_id: int) -> dict[str, str]:
     return out
 
 
-def _count_enrich_candidates(chat_id: int, kind: str) -> int:
-    """Photos in this chat that *could* have been enriched — has a URL
-    and isn't `download_status='skipped'` (on-site vk.com links and the
-    like are excluded by design). Used as the denominator for the
-    match-rate summary so the user sees how complete the export is.
-    """
-    with connection() as conn:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM attachments a"
-            " JOIN messages m ON m.id = a.message_id"
-            " WHERE m.chat_id = ?"
-            "   AND a.kind = ?"
-            "   AND a.url IS NOT NULL AND a.url != ''"
-            "   AND (a.download_status IS NULL OR a.download_status != 'skipped')",
-            (chat_id, kind),
-        ).fetchone()
-    return int(row[0]) if row else 0
-
-
 def _find_chat_rel(discovery, source_folder: str) -> str | None:
     """Match a DB-stored `source_folder` (basename) to one of the rel
     paths discovery returned (which include the `messages/` prefix).
@@ -386,10 +367,11 @@ def _render_chat(
         f"done · {blocks_total} blocks · {blocks_changed} inlined",
     )
 
-    # Match-rate summary. Photo-only for now (the only kind enrich
-    # currently downloads); when video/audio land we'll loop the same
-    # counters over each kind.
-    photo_candidates = _count_enrich_candidates(chat_meta["id"], "photo")
+    # Match-rate summary. Counters were bumped during the render pass
+    # itself (free, no extra DB scan), so this is instant on big chats.
+    # Photo-only for now — when video/audio enrich lands the same dict
+    # gains new keys without any rewrite here.
+    photo_candidates = ctx.candidates_by_kind.get("photo", 0)
     photo_downloaded = len(ctx.url_to_local)
     photo_injected = ctx.injected_by_kind.get("photo", 0)
     photo_pct = (

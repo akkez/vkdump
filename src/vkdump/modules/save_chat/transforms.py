@@ -59,6 +59,17 @@ class InlinePhotosTransform:
         for att in msg.attachments:
             if att.kind != KIND_PHOTO or not att.url:
                 continue
+            # Match enrich's queue-time exclusion: on-site vk.com URLs
+            # need auth/redirects and aren't downloaded, so they don't
+            # count as candidates here either. Anything else with a
+            # URL is fair game and bumps the denominator — done in the
+            # render loop so the end-of-run summary is free instead of
+            # paying a multi-second SELECT COUNT(*) at the finish.
+            if att.url.startswith("https://vk.com/"):
+                continue
+            ctx.candidates_by_kind[KIND_PHOTO] = (
+                ctx.candidates_by_kind.get(KIND_PHOTO, 0) + 1
+            )
             local_rel = ctx.url_to_local.get(att.url)
             if not local_rel:
                 continue
@@ -69,9 +80,6 @@ class InlinePhotosTransform:
             before = new_html
             new_html = self._inject(new_html, att, asset_rel)
             if new_html is not before:
-                # Per-attachment hit — feeds the end-of-run summary so
-                # the user sees "M of N photos inlined" rather than
-                # just block-level counts.
                 ctx.injected_by_kind[KIND_PHOTO] = (
                     ctx.injected_by_kind.get(KIND_PHOTO, 0) + 1
                 )

@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal, Slot
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QTextCursor
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -177,6 +177,30 @@ class TaskPanel(QWidget):
         self._status = QLabel("")
         self._log = QTextEdit()
         self._log.setReadOnly(True)
+        # Hard cap on the document so a chatty module (or SQL_DEBUG)
+        # can't grow it to the point where each insert restyles tens of
+        # thousands of blocks. Excess blocks fall off the top in FIFO.
+        self._log.document().setMaximumBlockCount(2000)
+
+        # Worker → GUI batching. On Windows in particular every
+        # QTextEdit.append() and every QProgressBar.setValue() triggers
+        # a native theme paint pass — at 100s/s the GUI thread spends
+        # most of its time in repaint. We coalesce: log lines pile up in
+        # a buffer flushed at ~20 Hz; the latest progress (main + per
+        # sub_id) is stored and applied at ~30 Hz. Worker emits stay
+        # cheap; the user-visible frame rate stays steady.
+        self._log_buffer: list[str] = []
+        self._log_flush_timer = QTimer(self)
+        self._log_flush_timer.setInterval(50)  # 20 Hz
+        self._log_flush_timer.timeout.connect(self._flush_log_buffer)
+        self._log_flush_timer.start()
+
+        self._pending_progress: tuple[int, int, str] | None = None
+        self._pending_sub_progress: dict[int, tuple[int, int, str]] = {}
+        self._progress_flush_timer = QTimer(self)
+        self._progress_flush_timer.setInterval(33)  # ~30 Hz
+        self._progress_flush_timer.timeout.connect(self._flush_progress_buffer)
+        self._progress_flush_timer.start()
 
         btn_row = QHBoxLayout()
         btn_row.addWidget(self._run_btn)
@@ -396,7 +420,10 @@ class TaskPanel(QWidget):
         except ValueError as e:
             self._status.setText(f"error: {e}")
             return
+        self._log_buffer.clear()
         self._log.clear()
+        self._pending_progress = None
+        self._pending_sub_progress.clear()
         self._status.setText("running…")
         self._progress.reset()
         # See __init__: degenerate range == "0%" placeholder until the
@@ -443,17 +470,56 @@ class TaskPanel(QWidget):
             self._cancel_btn.setEnabled(False)
 
     def _on_progress(self, current: int, total: int, message: str) -> None:
-        # `total <= 0` means the module doesn't know the size yet — keep
-        # the bar in its "0%" placeholder state instead of inventing a
-        # bogus total (the old behaviour would jam the bar to 100% by
-        # setting max == current).
-        self._progress.setRange(0, max(total, 0))
-        self._progress.setValue(current)
-        if message:
-            self._progress.setStatus(_strip_markup(message))
+        # Stash the latest tick; `_flush_progress_buffer` applies it on
+        # the next 30 Hz tick. Coalesces bursts so the bar repaints at
+        # most ~30 times/sec no matter how often the worker emits.
+        self._pending_progress = (current, total, message)
 
     def _on_log(self, message: str) -> None:
-        self._log.append(_strip_markup(message))
+        # Buffer; `_flush_log_buffer` drains at 20 Hz with one cursor
+        # insert per batch (vs N append() calls, which on Windows each
+        # trigger a full QTextEdit layout pass).
+        self._log_buffer.append(_strip_markup(message))
+
+    def _flush_progress_buffer(self) -> None:
+        if self._pending_progress is not None:
+            current, total, message = self._pending_progress
+            self._pending_progress = None
+            # `total <= 0` means the module doesn't know the size yet —
+            # keep the bar in its "0%" placeholder state instead of
+            # inventing a bogus total.
+            self._progress.setRange(0, max(total, 0))
+            self._progress.setValue(current)
+            if message:
+                self._progress.setStatus(_strip_markup(message))
+
+        if self._pending_sub_progress:
+            pending = self._pending_sub_progress
+            self._pending_sub_progress = {}
+            for sub_id, (current, total, message) in pending.items():
+                group = self._sub_bars.get(sub_id)
+                if group is None:
+                    continue
+                group.setRange(0, max(total, 0))
+                group.setValue(current)
+                if message:
+                    group.setStatus(_strip_markup(message))
+
+    def _flush_log_buffer(self) -> None:
+        if not self._log_buffer:
+            return
+        text = "\n".join(self._log_buffer)
+        self._log_buffer.clear()
+        cursor = self._log.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        # Prepend a newline only if the doc already has content, so we
+        # don't waste the first line on an empty separator.
+        if self._log.document().characterCount() > 1:
+            cursor.insertText("\n" + text)
+        else:
+            cursor.insertText(text)
+        sb = self._log.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     def _on_main_hidden(self) -> None:
         self._progress.setVisible(False)
@@ -468,13 +534,9 @@ class TaskPanel(QWidget):
         self._sub_bars[sub_id] = group
 
     def _on_sub_progress(self, sub_id: int, current: int, total: int, message: str) -> None:
-        group = self._sub_bars.get(sub_id)
-        if group is None:
-            return
-        group.setRange(0, max(total, 0))
-        group.setValue(current)
-        if message:
-            group.setStatus(_strip_markup(message))
+        # Coalesced — `_flush_progress_buffer` applies the latest tick
+        # per sub_id at ~30 Hz.
+        self._pending_sub_progress[sub_id] = (current, total, message)
 
     def _on_sub_ended(self, sub_id: int) -> None:
         self._remove_sub_bar(sub_id)
@@ -536,14 +598,20 @@ class TaskPanel(QWidget):
 
     def _on_finished(self, run_id: int, result: object) -> None:
         self._status.setText(f"ok — run #{run_id}")
-        self._log.append(f"run #{run_id} completed")
+        self._log_buffer.append(f"run #{run_id} completed")
+        self._flush_log_buffer()
+        self._flush_progress_buffer()
         self._reset_buttons()
 
     def _on_failed(self, run_id: int, error: str) -> None:
         self._status.setText(f"failed — run #{run_id}")
-        self._log.append(error)
+        self._log_buffer.append(error)
+        self._flush_log_buffer()
+        self._flush_progress_buffer()
         self._reset_buttons()
 
     def _on_cancelled(self, run_id: int) -> None:
         self._status.setText(f"cancelled — run #{run_id}")
+        self._flush_log_buffer()
+        self._flush_progress_buffer()
         self._reset_buttons()

@@ -28,6 +28,7 @@ from typing import Callable, Iterable
 from loguru import logger
 
 from ..core.db import connection
+from ..core.i18n import plural as _plural
 from ..core.progress import ProgressReporter, Throttle
 from ..parsers.vk import (
     ChatIndexEntry,
@@ -116,7 +117,7 @@ def _run_with_discovery(
                     progress.log(f"account_id resolved from messages-index: {account_id}")
             indexed_entries = {e.peer_folder: e for e in entries}
             _preload_chats_from_index(entries, source_tz, account_id=account_id)
-            progress.log(f"messages-index: preloaded {len(entries)} chat row(s) with titles")
+            progress.log(f"messages-index: preloaded {_plural(len(entries), 'chat row')} with titles")
         except Exception:
             logger.exception("messages-index parsing failed for {}", discovery.messages_index_file)
             progress.log(
@@ -153,8 +154,8 @@ def _run_with_discovery(
             f"{_plural(global_total, 'HTML page')} total"
         )
         logger.info(
-            "parse_dump: scanning {} chat folder(s), {} pages",
-            len(chat_plans), global_total,
+            "parse_dump: scanning {}, {} pages",
+            _plural(len(chat_plans), "chat folder"), global_total,
         )
         # Last-resort account_id resolution: if neither profile nor
         # messages-index supplied it, peek at the first chat's first
@@ -598,11 +599,6 @@ def _parse_single_page(
 
 
 # ---------- DB helpers ----------
-
-
-def _plural(count: int, noun: str, plural: str | None = None) -> str:
-    """English count + noun with a regular -s plural (or an override)."""
-    return f"{count} {noun if count == 1 else (plural or noun + 's')}"
 
 
 def _format_chat_label(chat_name: str, index_entry: ChatIndexEntry | None) -> str:

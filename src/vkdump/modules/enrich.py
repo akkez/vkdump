@@ -33,6 +33,7 @@ import certifi
 from loguru import logger
 
 from ..core.db import connection
+from ..core.i18n import plural
 from ..core.progress import Cancelled, ProgressReporter, Throttle
 
 # A current desktop Chrome string — VK CDN sometimes 403s on python-requests
@@ -119,8 +120,8 @@ def run(params: dict, progress: ProgressReporter) -> dict:
             n_filled = _backfill_resolutions_from_url()
             if n_filled:
                 progress.log(
-                    f"enrich-media: backfilled resolution for {n_filled} "
-                    f"already-OK row(s) via URL regex"
+                    f"enrich-media: backfilled resolution for "
+                    f"{plural(n_filled, 'already-OK row')} via URL regex"
                 )
         except Exception as exc:  # noqa: BLE001
             logger.exception("enrich-media: resolution backfill failed: {}", exc)
@@ -147,7 +148,7 @@ def run(params: dict, progress: ProgressReporter) -> dict:
     scope_note = f" chat_scope={chat_scope}" if chat_scope else ""
     strat_note = f" strategy={strategy}" if strategy != DEFAULT_STRATEGY else ""
     progress.log(
-        f"enrich-media: {len(rows)} attachment(s) to fetch, "
+        f"enrich-media: {plural(len(rows), 'attachment')} to fetch, "
         f"{resolved} already resolved "
         f"(kinds={list(kinds)}, concurrency={concurrency}, per_host={per_host}, "
         f"timeout={timeout_s}s{scope_note}{strat_note})"

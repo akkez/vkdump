@@ -18,6 +18,7 @@ from html import escape as html_escape
 from pathlib import Path
 
 from ...core.db import connection
+from ...core.i18n import plural
 from ...parsers.vk.models import KIND_PHOTO
 from .pipeline import TransformContext
 from .transforms import materialise_photo_asset
@@ -168,7 +169,7 @@ def _render_html(
         body_parts.append(
             f'<section class="year" id="y{html_escape(year, quote=True)}">'
             f'<h2>{html_escape(year)} '
-            f'<span class="count">· {len(items)} photo(s)</span></h2>'
+            f'<span class="count">· {html_escape(plural(len(items), "photo"))}</span></h2>'
             '<div class="gallery">'
         )
         for p in items:
@@ -203,7 +204,8 @@ def _render_html(
         f'<header class="page-head">'
         f'<a class="back" href="{back_href}">{back_label}</a>'
         f'<h1>{title}</h1>'
-        f'<p class="summary">{total} photo(s) across {len(sections)} year(s)</p>'
+        f'<p class="summary">{html_escape(plural(total, "photo"))}'
+        f' across {html_escape(plural(len(sections), "year"))}</p>'
         f'<nav class="year-nav">{nav_links}</nav>'
         '</header>'
         f'<main>{"".join(body_parts)}</main>'

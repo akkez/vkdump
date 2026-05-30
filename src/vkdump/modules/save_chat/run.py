@@ -26,6 +26,7 @@ from loguru import logger
 
 from ...core.app_config import set as cfg_set
 from ...core.db import app_dir, connection
+from ...core.i18n import plural
 from ...core.progress import Cancelled, ProgressReporter, Throttle
 from ...parsers.vk.discovery import discover
 from ...parsers.vk.messages import (
@@ -289,8 +290,8 @@ def _render_chat(
 
     url_to_meta = _build_url_meta(chat_meta["id"])
     progress.log(
-        f"save-chat: chat {chat_meta['peer_id']!r} → {len(pages)} page(s),"
-        f" {len(url_to_meta)} downloaded photo URL(s) to inline"
+        f"save-chat: chat {chat_meta['peer_id']!r} → {plural(len(pages), 'page')},"
+        f" {plural(len(url_to_meta), 'downloaded photo URL')} to inline"
     )
 
     # Folder layout (mirrors the VK archive's relative depth so the
@@ -321,7 +322,7 @@ def _render_chat(
     copied_assets = _copy_archive_assets(source, output_dir)
     if copied_assets:
         progress.log(
-            f"save-chat: copied {len(copied_assets)} CSS/JS file(s) from dump root"
+            f"save-chat: copied {plural(len(copied_assets), 'CSS/JS file')} from dump root"
         )
 
     static_root = app_dir() / "data" / "static"
@@ -397,7 +398,7 @@ def _render_chat(
     )
     progress.log(
         f"save-chat: photos — {photo_inlined} of {photo_mentions} photos inlined"
-        f" ({photo_pct}) · backed by {photo_unique} unique local file(s)"
+        f" ({photo_pct}) · backed by {plural(photo_unique, 'unique local file')}"
     )
 
     photos_page_name, photos_count = render_photos_page(
@@ -405,7 +406,7 @@ def _render_chat(
     )
     if photos_page_name:
         progress.log(
-            f"save-chat: gallery — {photos_count} photo(s) → {photos_page_name}"
+            f"save-chat: gallery — {plural(photos_count, 'photo')} → {photos_page_name}"
         )
 
     manifest = upsert_index(
@@ -421,7 +422,7 @@ def _render_chat(
         photos_count=photos_count,
     )
     progress.log(
-        f"save-chat: wrote {chat_out} · index now lists {len(manifest.chats)} chat(s)"
+        f"save-chat: wrote {chat_out} · index now lists {plural(len(manifest.chats), 'chat')}"
     )
 
     return {

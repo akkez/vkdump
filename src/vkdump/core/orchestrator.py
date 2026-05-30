@@ -10,6 +10,7 @@ from typing import Any
 from loguru import logger
 
 from .db import apply_migrations
+from .i18n import plural
 from .logging import configure_logging
 from .progress import ProgressReporter, Cancelled
 from .runs import start_run, finish_run
@@ -42,7 +43,7 @@ def execute(task: TaskSpec, params: dict, progress: ProgressReporter) -> TaskOut
     configure_logging()
     applied = apply_migrations()
     if applied:
-        logger.info("auto-applied {} pending migration(s) before task {}", len(applied), task.name)
+        logger.info("auto-applied {} before task {}", plural(len(applied), "pending migration"), task.name)
     run_id = start_run(task.name, _jsonable(params))
     try:
         result = task.run(params, progress)

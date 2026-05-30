@@ -24,6 +24,15 @@ def _last_save_chat_output() -> str | None:
     return app_config.get("save_chat.last_output")
 
 
+def _last_save_chat_chat() -> str | None:
+    """Re-select whichever chat the user picked in the previous save-chat
+    run. Value is the chats.id as a string — matches the picker's
+    choice values, so the combobox lands on the right row.
+    """
+    from ..core import app_config
+    return app_config.get("save_chat.last_chat")
+
+
 def _save_chat_open_path(result: dict) -> str | None:
     """Point the GUI's "Open output" button at the top-level index.html
     save-chat writes — landing page that lists every exported chat.
@@ -186,6 +195,7 @@ TASKS: list[TaskSpec] = [
                 label="Chat",
                 help="Which chat to render. Type to filter.",
                 choices_provider=_chat_picker_choices,
+                default_provider=_last_save_chat_chat,
             ),
             ParamSpec(
                 name="output",

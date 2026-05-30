@@ -106,6 +106,7 @@ def run(params: dict, progress: ProgressReporter) -> dict:
     try:
         cfg_set("save_chat.last_source", str(source_input.resolve()))
         cfg_set("save_chat.last_output", str(output_dir))
+        cfg_set("save_chat.last_chat", chat_pick)
     except Exception:  # noqa: BLE001
         pass
 

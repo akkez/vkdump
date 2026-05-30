@@ -74,19 +74,22 @@ class InlinePhotosTransform:
     @staticmethod
     def _materialise_asset(src: Path, year: str, ctx: TransformContext) -> str:
         """Copy/link `src` into the chat's asset tree, return the href
-        the rendered page should use (relative to chat dir, POSIX).
+        the rendered page should use — relative to `pages_dir` (where
+        the messagesN.html files live), POSIX-style. Since pages sit
+        at `<chat>/messages/`, that gives `../assets/<year>/...`.
         """
         already = ctx.copied_assets.get(src)
-        if already is not None:
-            return already.relative_to(ctx.output_chat_dir).as_posix()
-        # enrich.py names files <sha[:16]>.<ext>; the bucket is the
-        # first two hex chars, same convention as data/static/.
-        bucket = src.stem[:2] if len(src.stem) >= 2 else "_"
-        rel = Path("assets") / year / "photos" / bucket / src.name
-        dst = ctx.output_chat_dir / rel
-        _link_asset(src, dst)
-        ctx.copied_assets[src] = dst
-        return rel.as_posix()
+        if already is None:
+            # enrich.py names files <sha[:16]>.<ext>; the bucket is the
+            # first two hex chars, same convention as data/static/.
+            bucket = src.stem[:2] if len(src.stem) >= 2 else "_"
+            rel = Path("assets") / year / "photos" / bucket / src.name
+            dst = ctx.output_chat_dir / rel
+            _link_asset(src, dst)
+            ctx.copied_assets[src] = dst
+        else:
+            dst = already
+        return os.path.relpath(dst, ctx.pages_dir).replace(os.sep, "/")
 
     @staticmethod
     def _inject(html: str, att: ParsedAttachment, asset_href: str) -> str:

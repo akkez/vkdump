@@ -25,6 +25,11 @@ class ExportEntry:
     type: str               # 'dm' / 'group_chat' / etc.
     message_count: int
     exported_at: str        # ISO-8601 UTC
+    # Filename of the first page inside the chat folder (e.g.
+    # 'messages0.html'). Stored so the index can deep-link to it
+    # exactly the way VK's own index.html does — opening
+    # `<chat_slug>/` would just show a dir listing in most browsers.
+    first_page: str = ""
 
 
 @dataclass
@@ -56,6 +61,7 @@ def upsert(
     title: str,
     type_: str,
     message_count: int,
+    first_page: str = "",
 ) -> ExportManifest:
     """Insert or update the manifest entry for `chat_slug`. Returns the
     updated manifest so the caller can re-render the HTML index.
@@ -68,6 +74,7 @@ def upsert(
         type=type_,
         message_count=message_count,
         exported_at=_now(),
+        first_page=first_page,
     )
     manifest.chats = [c for c in manifest.chats if c.chat_slug != chat_slug]
     manifest.chats.append(entry)
@@ -95,8 +102,12 @@ def _render_html(manifest: ExportManifest) -> str:
     for c in manifest.chats:
         title = html_escape(c.title or c.chat_slug)
         slug = html_escape(c.chat_slug, quote=True)
+        # Deep-link straight to the first page if we know it (matches
+        # the way VK's own index.html points at messages0.html), else
+        # fall back to the chat folder.
+        href = f"{slug}/{html_escape(c.first_page, quote=True)}" if c.first_page else f"{slug}/"
         rows.append(
-            f'<li><a href="{slug}/">{title}</a>'
+            f'<li><a href="{href}">{title}</a>'
             f' <span class="meta">· {c.type} · {c.message_count} messages'
             f' · {html_escape(c.peer_id)} · exported {html_escape(c.exported_at)}</span></li>'
         )

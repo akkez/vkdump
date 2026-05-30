@@ -231,8 +231,8 @@ def _pick_rows(
     - URL is **not** `https://vk.com/...` — those are on-site links that
       need auth / redirect handling, we don't ever want them in the
       queue regardless of their stored status.
-    - If `chat_scope` is set: restrict to attachments from messages
-      whose chat has that `peer_id`.
+    - If `chat_scope` is set (the chats.id primary key as a string):
+      restrict to attachments from messages with that `chat_id`.
 
     Strategies (Python sort):
 
@@ -249,10 +249,14 @@ def _pick_rows(
         return [], 0
     placeholders = ",".join("?" * len(kinds))
 
-    needs_chats = chat_scope is not None or strategy in ("groups-first", "dms-first")
+    # `chat_scope` is `chats.id` (primary key, unambiguous across
+    # accounts). Filter via `m.chat_id` so we don't need the chats
+    # join just for scoping — the join is only pulled in when the
+    # strategy needs `c.type` (groups-first / dms-first).
+    needs_chats = strategy in ("groups-first", "dms-first")
     chat_join = " JOIN chats c ON c.id = m.chat_id" if needs_chats else ""
     chat_select = ", c.type AS chat_type" if needs_chats else ""
-    scope_clause = " AND c.peer_id = ?" if chat_scope is not None else ""
+    scope_clause = " AND m.chat_id = ?" if chat_scope is not None else ""
 
     chunk_sql = (
         "SELECT a.id, a.kind, a.url, a.local_path, a.download_status,"

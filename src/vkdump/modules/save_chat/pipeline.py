@@ -22,7 +22,13 @@ class TransformContext:
 
     chat_id: int
     chat_source_folder: str
+    # `<output>/<chat_slug>/` — where assets live and where the
+    # messages/ subfolder sits.
     output_chat_dir: Path
+    # `<output>/<chat_slug>/messages/` — where the rendered HTML pages
+    # are written. Asset hrefs in the HTML are computed relative to
+    # *this* directory (so `<img src="../assets/...">`).
+    pages_dir: Path
     # Repo's `data/static/` root where enrich-media stashes downloaded
     # files; transform reads originals from here.
     static_root: Path

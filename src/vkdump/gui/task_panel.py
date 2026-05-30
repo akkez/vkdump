@@ -152,6 +152,15 @@ class TaskPanel(QWidget):
         self._cancel_btn.setEnabled(False)
         self._run_btn.clicked.connect(self._on_run)
         self._cancel_btn.clicked.connect(self._on_cancel)
+        # Optional "Open output" button — only shown for tasks that
+        # declare a `result_open_path` callable. Stays disabled until
+        # a successful run produces a usable path on disk.
+        self._open_btn: QPushButton | None = None
+        self._open_path: str | None = None
+        if self._task.result_open_path is not None:
+            self._open_btn = QPushButton("Open output")
+            self._open_btn.setEnabled(False)
+            self._open_btn.clicked.connect(self._on_open_output)
 
         self._progress = AeroProgressGroup()
         # Start with a degenerate range — the group falls back to a flat
@@ -221,6 +230,8 @@ class TaskPanel(QWidget):
         btn_row = QHBoxLayout()
         btn_row.addWidget(self._run_btn)
         btn_row.addWidget(self._cancel_btn)
+        if self._open_btn is not None:
+            btn_row.addWidget(self._open_btn)
         btn_row.addStretch(1)
 
         layout = QVBoxLayout(self)
@@ -618,7 +629,25 @@ class TaskPanel(QWidget):
         self._log_buffer.append(f"run #{run_id} completed")
         self._flush_log_buffer()
         self._flush_progress_buffer()
+        self._update_open_button(result)
         self._reset_buttons()
+
+    def _update_open_button(self, result: object) -> None:
+        if self._open_btn is None or self._task.result_open_path is None:
+            return
+        try:
+            path = self._task.result_open_path(result)
+        except Exception:  # noqa: BLE001
+            path = None
+        self._open_path = str(path) if path else None
+        self._open_btn.setEnabled(bool(self._open_path))
+
+    def _on_open_output(self) -> None:
+        if not self._open_path:
+            return
+        import webbrowser
+        from pathlib import Path as _Path
+        webbrowser.open(_Path(self._open_path).resolve().as_uri())
 
     def _on_failed(self, run_id: int, error: str) -> None:
         self._status.setText(f"failed — run #{run_id}")

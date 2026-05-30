@@ -28,17 +28,18 @@ from ...core.app_config import set as cfg_set
 from ...core.db import app_dir, connection
 from ...core.progress import Cancelled, ProgressReporter, Throttle
 from ...parsers.vk.discovery import discover
-from ...parsers.vk.messages import _iter_message_blocks, _parse_one_message, read_page
+from ...parsers.vk.messages import (
+    _iter_message_blocks,
+    _parse_one_message,
+    parse_chat_meta,
+    read_page,
+)
 from ...parsers.vk.pages import is_message_page_filename, list_message_pages
 from ...parsers.vk.sources import join as source_join
 from .index import upsert as upsert_index
 from .pipeline import TransformContext, apply_pipeline
 from .transforms import DEFAULT_TRANSFORMS
 
-
-# Strip path components VK never uses (`..`, leading `/`) so a hostile
-# source_folder can't escape the output dir.
-_SLUG_SAFE = re.compile(r"[^A-Za-z0-9._+\-]")
 
 # VK dumps declare `windows-1251` in their `<meta>` tag. We decode them
 # correctly on read, but write the output as UTF-8 — so the meta must
@@ -48,12 +49,17 @@ _META_CHARSET_RE = re.compile(
     r"(?i)(<meta[^>]*charset\s*=\s*['\"]?)(windows-1251|cp1251)(['\"]?)"
 )
 
+# CSS/JS bundled at the archive root that messagesN.html references.
+# We copy these per-chat-folder so each export dir is self-contained,
+# then rewrite stylesheet/script refs in the HTML to just the basename.
+_ASSET_EXTS = (".css", ".js")
+
 
 def run(params: dict, progress: ProgressReporter) -> dict:
     source_input = Path(params["source"]).expanduser()
-    peer_id = str(params["chat"]).strip()
+    chat_pick = str(params["chat"]).strip()
     output_input = Path(params["output"]).expanduser()
-    if not peer_id:
+    if not chat_pick:
         raise ValueError("Chat is required")
     output_dir = output_input.resolve()
 
@@ -64,9 +70,14 @@ def run(params: dict, progress: ProgressReporter) -> dict:
     except Exception:  # noqa: BLE001
         pass
 
-    chat_meta = _lookup_chat(peer_id)
+    # The picker hands us `chats.id` (unambiguous across accounts).
+    try:
+        chat_id = int(chat_pick)
+    except ValueError as exc:
+        raise ValueError(f"Bad chat id from picker: {chat_pick!r}") from exc
+    chat_meta = _lookup_chat(chat_id)
     if chat_meta is None:
-        raise ValueError(f"No chat in DB with peer_id={peer_id!r}")
+        raise ValueError(f"No chat in DB with id={chat_id}")
 
     discovery = discover(source_input)
     try:
@@ -83,12 +94,81 @@ def run(params: dict, progress: ProgressReporter) -> dict:
 # ---------- internals ----------
 
 
-def _lookup_chat(peer_id: str) -> dict | None:
+def _copy_archive_assets(source, chat_out: Path) -> list[str]:
+    """Copy `*.css` / `*.js` from the dump root into the chat output
+    folder. Returns the basenames copied — used to drive the href
+    rewrite that flattens `../../style.css` to plain `style.css`.
+
+    Why per-chat instead of one shared `<output>/style.css`: each chat
+    folder ends up self-contained, so the user can zip/move/share one
+    chat without dragging an out-of-folder dependency.
+    """
+    copied: list[str] = []
+    try:
+        names = source.listdir("")
+    except Exception:  # noqa: BLE001
+        return copied
+    for name in names:
+        if not name.lower().endswith(_ASSET_EXTS):
+            continue
+        if not source.is_file(name):
+            continue
+        try:
+            data = source.read_bytes(name)
+        except Exception:  # noqa: BLE001
+            continue
+        dst = chat_out / name
+        if dst.exists() and dst.stat().st_size == len(data):
+            copied.append(name)
+            continue
+        dst.write_bytes(data)
+        copied.append(name)
+    return copied
+
+
+def _assert_dump_matches_chat(source, first_page_rel: str, chat_meta: dict) -> None:
+    """Read the first page's jd meta and confirm its account_id matches
+    the DB chat we're about to render. Different accounts can re-use
+    `source_folder` values so this is the only way to spot a wrong-dump
+    pick before bytes hit the output dir.
+    """
+    try:
+        html = read_page(source, first_page_rel)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"Could not read {first_page_rel} to verify dump identity: {exc}"
+        ) from exc
+    meta = parse_chat_meta(html, source_folder=chat_meta["source_folder"])
+    dump_account = (meta.account_id or "").strip()
+    db_account = str(chat_meta["account_id"] or "").strip()
+    if not dump_account:
+        # No meta in the page — let it through with a warning; older
+        # exports / partial archives sometimes lack it.
+        logger.warning(
+            "save-chat: dump page {} has no account_id in meta; cannot cross-check",
+            first_page_rel,
+        )
+        return
+    if dump_account != db_account:
+        raise ValueError(
+            "Account mismatch: the dump at "
+            f"{source.describe()!r} belongs to account_id={dump_account!r},"
+            f" but the picked chat (id={chat_meta['id']},"
+            f" peer_id={chat_meta['peer_id']!r}, source_folder="
+            f"{chat_meta['source_folder']!r}) is stored under"
+            f" account_id={db_account!r}."
+            " Re-pick the chat (the picker label shows acct=…) or point"
+            " at the matching dump."
+        )
+
+
+def _lookup_chat(chat_id: int) -> dict | None:
     with connection() as conn:
         row = conn.execute(
-            "SELECT id, peer_id, title, type, source_folder, message_count"
-            " FROM chats WHERE peer_id = ? LIMIT 1",
-            (peer_id,),
+            "SELECT id, peer_id, account_id, provider, title, type,"
+            " source_folder, message_count"
+            " FROM chats WHERE id = ?",
+            (chat_id,),
         ).fetchone()
     return dict(row) if row else None
 
@@ -134,13 +214,6 @@ def _find_chat_rel(discovery, source_folder: str) -> str | None:
     return None
 
 
-def _slugify(name: str) -> str:
-    s = _SLUG_SAFE.sub("_", name.strip()) or "chat"
-    # No leading dots, no path traversal, length cap so very long
-    # community names don't blow past Windows MAX_PATH.
-    return s.lstrip(".")[:80] or "chat"
-
-
 def _render_chat(
     *,
     discovery,
@@ -159,21 +232,51 @@ def _render_chat(
     if not pages:
         raise FileNotFoundError(f"No messagesN.html pages under {chat_rel!r}")
 
+    # Hard sanity check: the same source_folder name (e.g. "2000000004")
+    # can exist under TWO different dumps from TWO different VK
+    # accounts. Cross-check the dump's own jd-meta account_id against
+    # what the DB row says — bail loudly before writing anything if
+    # they disagree, otherwise we'd silently render a stranger's chat
+    # into the user's export.
+    _assert_dump_matches_chat(source, pages[0], chat_meta)
+
     url_to_local = _build_url_map(chat_meta["id"])
     progress.log(
         f"save-chat: chat {chat_meta['peer_id']!r} → {len(pages)} page(s),"
         f" {len(url_to_local)} downloaded photo URL(s) to inline"
     )
 
-    chat_slug = _slugify(chat_meta["source_folder"])
+    # Folder layout (mirrors the VK archive's relative depth so the
+    # original `<link href="../../style.css">` resolves without href
+    # rewriting):
+    #   <output>/
+    #     index.html
+    #     style.css          ← shared, copied from archive root
+    #     <chat_id>/
+    #       assets/<year>/photos/<sha[:2]>/...
+    #       messages/messages0.html, messages1.html, …
+    # Slug = `chats.id` so two different accounts' chats with the same
+    # peer_id can't overwrite each other's folder.
+    chat_slug = str(chat_meta["id"])
     chat_out = (output_dir / chat_slug).resolve()
-    chat_out.mkdir(parents=True, exist_ok=True)
+    pages_dir = chat_out / "messages"
+    pages_dir.mkdir(parents=True, exist_ok=True)
+
+    # CSS/JS at the shared output root (same place VK puts it relative
+    # to the archive). Pages keep their original `../../style.css`-style
+    # refs verbatim — they resolve correctly at this depth.
+    copied_assets = _copy_archive_assets(source, output_dir)
+    if copied_assets:
+        progress.log(
+            f"save-chat: copied {len(copied_assets)} CSS/JS file(s) from dump root"
+        )
 
     static_root = app_dir() / "data" / "static"
     ctx = TransformContext(
         chat_id=chat_meta["id"],
         chat_source_folder=chat_meta["source_folder"],
         output_chat_dir=chat_out,
+        pages_dir=pages_dir,
         static_root=static_root,
         url_to_local=url_to_local,
         log=progress.log,
@@ -183,6 +286,7 @@ def _render_chat(
     throttle = Throttle()
     blocks_total = 0
     blocks_changed = 0
+    first_page_name = ""
     progress.report(0, total, "Rendering pages…")
     for i, page_rel in enumerate(pages, start=1):
         progress.check_cancelled()
@@ -203,7 +307,9 @@ def _render_chat(
         page_name = Path(page_rel).name
         if not is_message_page_filename(page_name):
             page_name = f"messages{i}.html"
-        (chat_out / page_name).write_text(new_html, encoding="utf-8")
+        (pages_dir / page_name).write_text(new_html, encoding="utf-8")
+        if not first_page_name:
+            first_page_name = page_name
         if throttle(i, total):
             progress.report(
                 i, total,
@@ -222,6 +328,7 @@ def _render_chat(
         title=chat_meta["title"] or chat_slug,
         type_=chat_meta["type"] or "?",
         message_count=int(chat_meta["message_count"] or 0),
+        first_page=f"messages/{first_page_name}" if first_page_name else "",
     )
     progress.log(
         f"save-chat: wrote {chat_out} · index now lists {len(manifest.chats)} chat(s)"

@@ -154,7 +154,7 @@ def enrich_media_cmd(
         str | None,
         typer.Option(
             "--chat",
-            help="Limit to one conversation by `chats.peer_id`. Default: every chat.",
+            help="Limit to one conversation by `chats.id` (primary key — unambiguous across accounts; peer_id collides). Default: every chat.",
         ),
     ] = None,
     strategy: Annotated[
@@ -206,7 +206,7 @@ def save_chat_cmd(
     ],
     chat: Annotated[
         str,
-        typer.Argument(help="peer_id of the chat to render (see `vkdump stats`)."),
+        typer.Argument(help="`chats.id` of the chat to render (primary key — unambiguous across accounts; see `vkdump stats`)."),
     ],
     output: Annotated[
         Path,

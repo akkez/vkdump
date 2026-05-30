@@ -34,3 +34,8 @@ class TaskSpec:
     description: str
     run: Callable[[dict, ProgressReporter], Any]
     params: list[ParamSpec] = field(default_factory=list)
+    # Optional: maps a successful run's result dict to a file system
+    # path (typically an HTML index) that the GUI's "Open output"
+    # button should reveal in the user's default browser. Returns
+    # None / missing when the run produced nothing openable.
+    result_open_path: Callable[[Any], Any] | None = None

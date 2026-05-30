@@ -24,6 +24,20 @@ def _last_save_chat_output() -> str | None:
     return app_config.get("save_chat.last_output")
 
 
+def _save_chat_open_path(result: dict) -> str | None:
+    """Point the GUI's "Open output" button at the top-level index.html
+    save-chat writes — landing page that lists every exported chat.
+    """
+    if not isinstance(result, dict):
+        return None
+    out = result.get("output_dir")
+    if not out:
+        return None
+    from pathlib import Path
+    p = Path(out) / "index.html"
+    return str(p) if p.is_file() else None
+
+
 def _chat_picker_choices() -> list[tuple[str, str]]:
     """Same list as the enrich scope picker, but without the 'All chats'
     sentinel — save-chat renders one chat at a time, so an empty pick
@@ -33,9 +47,14 @@ def _chat_picker_choices() -> list[tuple[str, str]]:
 
 
 def _chat_scope_choices() -> list[tuple[str, str]]:
-    """Populate the enrich-media chat-scope dropdown from the DB at
-    form-build time. Returns (peer_id-as-string, label) pairs ordered
-    by message count desc so the busiest chats land at the top.
+    """Populate the chat-scope dropdown from the DB at form-build time.
+
+    Choice **value** is the chat's primary key (`chats.id`), not its
+    `peer_id` — peer_id collides across multiple-account dumps (two
+    different conversations can share `peer_id=2000000004` if they
+    came from different VK accounts). The id is unambiguous; downstream
+    code resolves the row by it. Label exposes account_id so the user
+    can tell duplicates apart at pick time.
     """
     from ..core.db import connection
     out: list[tuple[str, str]] = [("", "All chats")]
@@ -43,7 +62,7 @@ def _chat_scope_choices() -> list[tuple[str, str]]:
         with connection() as conn:
             rows = conn.execute(
                 """
-                SELECT peer_id, title, type, message_count
+                SELECT id, peer_id, account_id, title, type, message_count
                   FROM chats
                  WHERE peer_id IS NOT NULL AND peer_id != ''
                  ORDER BY message_count DESC, id
@@ -55,8 +74,12 @@ def _chat_scope_choices() -> list[tuple[str, str]]:
     for r in rows:
         title = (r["title"] or "").strip() or "(untitled)"
         tag = r["type"] or "?"
+        acct = r["account_id"] or "?"
         out.append(
-            (str(r["peer_id"]), f"{title} — {tag} (peer_id={r['peer_id']})")
+            (
+                str(r["id"]),
+                f"{title} — {tag} (acct={acct}, peer_id={r['peer_id']})",
+            )
         )
     return out
 
@@ -173,6 +196,7 @@ TASKS: list[TaskSpec] = [
             ),
         ],
         run=save_chat.run,
+        result_open_path=_save_chat_open_path,
     ),
     TaskSpec(
         name="stats",

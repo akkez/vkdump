@@ -11,9 +11,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Callable, NamedTuple, Protocol
 
 from ...parsers.vk.models import ParsedMessage
+
+
+class AttMeta(NamedTuple):
+    """Per-URL metadata pulled from the DB for downloaded attachments.
+
+    `resolution` is a kind-agnostic "<W>x<H>" string (cheaply extracted
+    from the URL by enrich when possible; later we can backfill via
+    Pillow/ffmpeg). `file_size` is bytes-on-disk.
+    """
+
+    local_path: str
+    resolution: str | None
+    file_size: int | None
 
 
 @dataclass
@@ -32,10 +45,10 @@ class TransformContext:
     # Repo's `data/static/` root where enrich-media stashes downloaded
     # files; transform reads originals from here.
     static_root: Path
-    # url → local_path-relative-to-static_root mapping for this chat's
-    # attachments that have a successful download. Built once upfront so
+    # url → AttMeta (local_path + resolution + file_size) for this
+    # chat's successfully downloaded attachments. Built once upfront so
     # transforms don't hit the DB per message.
-    url_to_local: dict[str, str]
+    url_to_meta: dict[str, AttMeta]
     # Hardlink/copy bookkeeping: maps the absolute source path on disk to
     # the path under output_chat_dir we wrote it to. Lets the renderer
     # dedupe identical assets (same URL across many messages → one file).

@@ -20,6 +20,7 @@ import asyncio
 import email.utils
 import hashlib
 import os
+import re
 import signal
 import sqlite3
 import ssl
@@ -522,6 +523,7 @@ async def _fetch_one(
             "local_path": str(rel),
             "file_size": abs_path.stat().st_size,
             "content_type": None,
+            "resolution": _resolution_from_url(url),
         }
 
     last_modified_ts: float | None = None
@@ -581,6 +583,7 @@ async def _fetch_one(
         "file_size": len(data),
         "content_type": ct,
         "remote_modified_at": _ts_to_iso(last_modified_ts),
+        "resolution": _resolution_from_url(url),
     }
 
 
@@ -602,7 +605,8 @@ def _persist_result(att_id: int, url: str | None, result: dict) -> None:
                    local_path = COALESCE(?, local_path),
                    file_size = COALESCE(?, file_size),
                    content_type = COALESCE(?, content_type),
-                   remote_modified_at = COALESCE(?, remote_modified_at)
+                   remote_modified_at = COALESCE(?, remote_modified_at),
+                   resolution = COALESCE(?, resolution)
              WHERE id = ?
             """,
             (
@@ -612,12 +616,30 @@ def _persist_result(att_id: int, url: str | None, result: dict) -> None:
                 result.get("file_size"),
                 result.get("content_type"),
                 result.get("remote_modified_at"),
+                result.get("resolution"),
                 att_id,
             ),
         )
 
 
 # ---------- paths / validation ----------
+
+
+# VK CDN URLs frequently encode the rendered image size in the query
+# string, e.g. `?size=379x309&quality=96&sign=…&type=album`. Reading
+# resolution from there is a regex match — no fetch, no Pillow, no
+# decode pass. When it's not present we leave `resolution` NULL and a
+# future pass (e.g. Pillow on the cached file) can fill it in.
+_URL_SIZE_RE = re.compile(r"[?&]size=(\d{1,5})x(\d{1,5})", re.IGNORECASE)
+
+
+def _resolution_from_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    m = _URL_SIZE_RE.search(url)
+    if m is None:
+        return None
+    return f"{m.group(1)}x{m.group(2)}"
 
 
 def _parse_http_date(raw: str | None) -> float | None:

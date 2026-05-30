@@ -37,7 +37,7 @@ from ...parsers.vk.messages import (
 from ...parsers.vk.pages import is_message_page_filename, list_message_pages
 from ...parsers.vk.sources import join as source_join
 from .index import find_slug_for_chat, upsert as upsert_index
-from .pipeline import TransformContext, apply_pipeline
+from .pipeline import AttMeta, TransformContext, apply_pipeline
 from .transforms import DEFAULT_TRANSFORMS
 
 
@@ -213,14 +213,16 @@ def _lookup_chat(chat_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-def _build_url_map(chat_id: int) -> dict[str, str]:
-    """One pass over this chat's downloaded attachments. Returns
-    {original_url: local_path_under_static_root}.
+def _build_url_meta(chat_id: int) -> dict[str, AttMeta]:
+    """One DB pass over this chat's downloaded attachments. Returns
+    `{url: AttMeta(local_path, resolution, file_size)}` so the renderer
+    can build a richer `<img alt>` without per-attachment lookups.
     """
-    out: dict[str, str] = {}
+    out: dict[str, AttMeta] = {}
     with connection() as conn:
         for row in conn.execute(
-            "SELECT a.url, a.local_path FROM attachments a"
+            "SELECT a.url, a.local_path, a.resolution, a.file_size"
+            " FROM attachments a"
             " JOIN messages m ON m.id = a.message_id"
             " WHERE m.chat_id = ?"
             "   AND a.download_status = 'ok'"
@@ -231,7 +233,11 @@ def _build_url_map(chat_id: int) -> dict[str, str]:
             url = row[0]
             local = row[1]
             if url and local:
-                out[url] = local
+                out[url] = AttMeta(
+                    local_path=local,
+                    resolution=row[2],
+                    file_size=row[3],
+                )
     return out
 
 
@@ -280,10 +286,10 @@ def _render_chat(
     # into the user's export.
     _assert_dump_matches_chat(source, pages[0], chat_meta)
 
-    url_to_local = _build_url_map(chat_meta["id"])
+    url_to_meta = _build_url_meta(chat_meta["id"])
     progress.log(
         f"save-chat: chat {chat_meta['peer_id']!r} → {len(pages)} page(s),"
-        f" {len(url_to_local)} downloaded photo URL(s) to inline"
+        f" {len(url_to_meta)} downloaded photo URL(s) to inline"
     )
 
     # Folder layout (mirrors the VK archive's relative depth so the
@@ -324,7 +330,7 @@ def _render_chat(
         output_chat_dir=chat_out,
         pages_dir=pages_dir,
         static_root=static_root,
-        url_to_local=url_to_local,
+        url_to_meta=url_to_meta,
         log=progress.log,
     )
 
@@ -383,7 +389,7 @@ def _render_chat(
     #               a forwarded photo at the same URL is 1 file
     photo_mentions = ctx.candidates_by_kind.get("photo", 0)
     photo_inlined = ctx.injected_by_kind.get("photo", 0)
-    photo_unique = len(ctx.url_to_local)
+    photo_unique = len(ctx.url_to_meta)
     photo_pct = (
         f"{(photo_inlined / photo_mentions * 100):.1f}%"
         if photo_mentions else "n/a"

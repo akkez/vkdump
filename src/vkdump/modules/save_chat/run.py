@@ -28,7 +28,7 @@ from ...core.app_config import set as cfg_set
 from ...core.db import app_dir, connection
 from ...core.progress import Cancelled, ProgressReporter, Throttle
 from ...parsers.vk.discovery import discover
-from ...parsers.vk.messages import _iter_message_blocks, _parse_one_message
+from ...parsers.vk.messages import _iter_message_blocks, _parse_one_message, read_page
 from ...parsers.vk.pages import is_message_page_filename, list_message_pages
 from ...parsers.vk.sources import join as source_join
 from .index import upsert as upsert_index
@@ -39,6 +39,14 @@ from .transforms import DEFAULT_TRANSFORMS
 # Strip path components VK never uses (`..`, leading `/`) so a hostile
 # source_folder can't escape the output dir.
 _SLUG_SAFE = re.compile(r"[^A-Za-z0-9._+\-]")
+
+# VK dumps declare `windows-1251` in their `<meta>` tag. We decode them
+# correctly on read, but write the output as UTF-8 — so the meta must
+# follow or browsers mojibake. Both attribute orderings show up in the
+# wild; case-insensitive match handles both.
+_META_CHARSET_RE = re.compile(
+    r"(?i)(<meta[^>]*charset\s*=\s*['\"]?)(windows-1251|cp1251)(['\"]?)"
+)
 
 
 def run(params: dict, progress: ProgressReporter) -> dict:
@@ -179,15 +187,19 @@ def _render_chat(
     for i, page_rel in enumerate(pages, start=1):
         progress.check_cancelled()
         try:
-            page_bytes = source.read_bytes(page_rel)
+            # VK dumps are Windows-1251 — same helper parse-dump uses,
+            # so cyrillic month names parse correctly.
+            html = read_page(source, page_rel)
         except Exception as exc:  # noqa: BLE001
             logger.exception("save-chat: failed to read {}", page_rel)
             progress.log(f"save-chat: skipping {page_rel}: {exc}")
             continue
-        html = page_bytes.decode("utf-8", errors="replace")
         new_html, n_blocks, n_changed = _transform_page(html, page_rel, ctx)
         blocks_total += n_blocks
         blocks_changed += n_changed
+        # Rewrite the source's `<meta charset=windows-1251>` to utf-8
+        # so the browser doesn't mojibake what we just decoded cleanly.
+        new_html = _META_CHARSET_RE.sub(r"\1utf-8\3", new_html)
         page_name = Path(page_rel).name
         if not is_message_page_filename(page_name):
             page_name = f"messages{i}.html"

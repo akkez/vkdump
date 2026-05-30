@@ -1,5 +1,6 @@
 import sqlite3
 import sys
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -7,6 +8,68 @@ from typing import Iterator
 from loguru import logger
 
 from .settings import get_settings
+
+
+class CancelHandle:
+    """Cross-thread SQLite-query cancellation token.
+
+    `sqlite3.Connection.interrupt()` is safe to call from any thread and
+    aborts the currently-executing statement on that connection with
+    `OperationalError: interrupted`. A handle is attached to whatever
+    connection the worker thread happens to be using; calling `cancel()`
+    from another thread (e.g. the GUI on window close) interrupts that
+    statement and marks the handle so any subsequent `attach()` from the
+    same worker also interrupts immediately. Idempotent.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._conn: sqlite3.Connection | None = None
+
+    def attach(self, conn: sqlite3.Connection) -> None:
+        with self._lock:
+            self._conn = conn
+            already = self._cancelled
+        if already:
+            try:
+                conn.interrupt()
+            except sqlite3.ProgrammingError:
+                pass
+
+    def detach(self, conn: sqlite3.Connection) -> None:
+        with self._lock:
+            if self._conn is conn:
+                self._conn = None
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._cancelled = True
+            conn = self._conn
+        if conn is not None:
+            try:
+                conn.interrupt()
+            except sqlite3.ProgrammingError:
+                pass
+
+    def is_cancelled(self) -> bool:
+        return self._cancelled
+
+
+_active_cancel = threading.local()
+
+
+def set_active_cancel(handle: CancelHandle | None) -> None:
+    """Install (or clear) the cancel handle that subsequent `connection()`
+    calls on the current thread auto-attach to. Workers call this at the
+    top of their `run()`; library code that opens connections doesn't
+    need to know whether cancellation is enabled.
+    """
+    _active_cancel.handle = handle
+
+
+def _current_cancel() -> CancelHandle | None:
+    return getattr(_active_cancel, "handle", None)
 
 
 def _frozen() -> bool:
@@ -44,19 +107,35 @@ def _migrations_dir() -> Path:
 
 @contextmanager
 def connection() -> Iterator[sqlite3.Connection]:
-    """Open a short-lived SQLite connection. Commit on success, rollback on error."""
+    """Open a short-lived SQLite connection. Commit on success, rollback on error.
+
+    If a `CancelHandle` is installed via `set_active_cancel()` on the
+    current thread, the new connection is attached to it so a concurrent
+    `handle.cancel()` (typically from the GUI thread on window close)
+    can interrupt an in-flight query.
+    """
     db_path = resolve_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    cancel = _current_cancel()
+    if cancel is not None:
+        cancel.attach(conn)
     try:
+        if cancel is not None and cancel.is_cancelled():
+            # Cancel fired before we even opened the conn (or between
+            # open and yield); `conn.interrupt()` is a no-op when no
+            # query is running, so we'd otherwise leak a free query.
+            raise sqlite3.OperationalError("interrupted")
         yield conn
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     finally:
+        if cancel is not None:
+            cancel.detach(conn)
         conn.close()
 
 

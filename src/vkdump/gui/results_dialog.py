@@ -11,6 +11,7 @@ popup; the main window embeds `StatsView` directly in a tab.
 """
 from __future__ import annotations
 
+import sqlite3
 from typing import Any, Callable, Sequence
 
 from PySide6.QtCore import (
@@ -23,6 +24,8 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
+
+from ..core.db import CancelHandle, set_active_cancel
 from PySide6.QtWidgets import (
     QDialog,
     QHeaderView,
@@ -113,20 +116,42 @@ class _RollupSignals(QObject):
 
 
 class _Rollup(QRunnable):
-    """Run a single rollup callable off the GUI thread."""
+    """Run a single rollup callable off the GUI thread.
+
+    Owns a `CancelHandle` so the StatsView can interrupt the rollup's
+    SQLite query (e.g. on window close) without waiting for a multi-
+    second aggregation to finish on a dead window.
+    """
 
     def __init__(self, fn: Callable[[], Any]) -> None:
         super().__init__()
         self._fn = fn
         self.signals = _RollupSignals()
+        self.cancel_handle = CancelHandle()
+
+    def cancel(self) -> None:
+        self.cancel_handle.cancel()
 
     @Slot()
     def run(self) -> None:
+        if self.cancel_handle.is_cancelled():
+            # Window closed before the pool got around to scheduling us.
+            return
+        set_active_cancel(self.cancel_handle)
         try:
             result = self._fn()
+        except sqlite3.OperationalError as exc:
+            if self.cancel_handle.is_cancelled() or "interrupt" in str(exc).lower():
+                # Window-close cancellation; drop the result on the floor
+                # so the dying widget isn't asked to render anything.
+                return
+            self._safe_emit(self.signals.failed, f"{type(exc).__name__}: {exc}")
+            return
         except Exception as exc:  # noqa: BLE001
             self._safe_emit(self.signals.failed, f"{type(exc).__name__}: {exc}")
             return
+        finally:
+            set_active_cancel(None)
         self._safe_emit(self.signals.done, result)
 
     @staticmethod
@@ -274,6 +299,13 @@ class StatsView(QWidget):
             return
         self._started = True
         self._start_loaders()
+
+    def cancel_all(self) -> None:
+        """Interrupt any in-flight rollup queries. Safe to call from the
+        GUI thread; uses `sqlite3.Connection.interrupt()` under the hood.
+        """
+        for r in self._runnables:
+            r.cancel()
 
     def _start_loaders(self) -> None:
         # Imported lazily so test-time import of this module doesn't drag

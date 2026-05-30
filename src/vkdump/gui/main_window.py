@@ -42,6 +42,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # type: ignore[override]
         active = [p for p in self._task_panels if p.has_active_run()]
         if not active:
+            self._cancel_background_queries()
             event.accept()
             return
         names = ", ".join(p._task.title for p in active)
@@ -56,6 +57,15 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
+            self._cancel_background_queries()
             event.accept()
         else:
             event.ignore()
+
+    def _cancel_background_queries(self) -> None:
+        """Interrupt the Stats tab's SQLite rollups so multi-second
+        aggregations don't keep churning in the worker pool after the
+        window is gone.
+        """
+        if self._stats_view is not None:
+            self._stats_view.cancel_all()

@@ -99,11 +99,19 @@ class InlinePhotosTransform:
             return html
         alt = html_escape(att.description or "photo", quote=True)
         href = html_escape(asset_href, quote=True)
+        # Block-level wrapper with inline styles so we don't depend on
+        # VK's own CSS: description/link in VK markup is inline, so
+        # without `display:block` the injected image flows mid-sentence
+        # next to "Фотография" and the URL. Margins separate it from
+        # the surrounding text; max-width keeps wide images contained.
         tag = (
-            f'<a class="attachment__inline-link" href="{href}">'
-            f'<img class="attachment__inline" loading="lazy" '
-            f'src="{href}" alt="{alt}">'
-            f'</a><br>'
+            '<div class="vkdump-inline-photo"'
+            ' style="display:block;margin:6px 0">'
+            f'<a href="{href}" style="display:inline-block">'
+            f'<img loading="lazy" src="{href}" alt="{alt}"'
+            ' style="display:block;max-width:100%;height:auto">'
+            '</a>'
+            '</div>'
         )
         return html[:m.start()] + tag + html[m.start():]
 

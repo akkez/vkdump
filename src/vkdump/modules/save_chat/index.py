@@ -8,7 +8,7 @@ in place.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from html import escape as html_escape
 from pathlib import Path
@@ -30,6 +30,11 @@ class ExportEntry:
     # exactly the way VK's own index.html does — opening
     # `<chat_slug>/` would just show a dir listing in most browsers.
     first_page: str = ""
+    # chats.id at export time — primary key in the source DB, so a
+    # re-export of the same chat (with a possibly renamed title) can
+    # reuse the original folder slug instead of stranding the old one.
+    # Optional/zero for entries written before this field existed.
+    chat_id: int = 0
 
 
 @dataclass
@@ -50,8 +55,26 @@ def load(output_dir: Path) -> ExportManifest:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return ExportManifest()
-    chats = [ExportEntry(**c) for c in raw.get("chats", [])]
+    # Tolerate older sidecars that lack fields added later (`first_page`,
+    # `chat_id`, …) by dropping unknown keys and letting dataclass
+    # defaults fill in missing ones. Keeps existing exports loadable.
+    known = {f.name for f in fields(ExportEntry)}
+    chats = [ExportEntry(**{k: v for k, v in c.items() if k in known}) for c in raw.get("chats", [])]
     return ExportManifest(version=raw.get("version", 1), chats=chats)
+
+
+def find_slug_for_chat(output_dir: Path, chat_id: int) -> str | None:
+    """Return the existing slug for `chat_id` if any past export to
+    this dir used it. Lets us reuse the original folder name even when
+    the chat's display title later changes.
+    """
+    if not chat_id:
+        return None
+    manifest = load(output_dir)
+    for c in manifest.chats:
+        if c.chat_id == chat_id:
+            return c.chat_slug
+    return None
 
 
 def upsert(
@@ -62,6 +85,7 @@ def upsert(
     type_: str,
     message_count: int,
     first_page: str = "",
+    chat_id: int = 0,
 ) -> ExportManifest:
     """Insert or update the manifest entry for `chat_slug`. Returns the
     updated manifest so the caller can re-render the HTML index.
@@ -75,8 +99,15 @@ def upsert(
         message_count=message_count,
         exported_at=_now(),
         first_page=first_page,
+        chat_id=chat_id,
     )
-    manifest.chats = [c for c in manifest.chats if c.chat_slug != chat_slug]
+    # Dedupe by slug AND by chat_id — covers the case where an earlier
+    # export used a different slug for the same chat (e.g. before
+    # `chat_id` was tracked, or after a title rename).
+    manifest.chats = [
+        c for c in manifest.chats
+        if c.chat_slug != chat_slug and (chat_id == 0 or c.chat_id != chat_id)
+    ]
     manifest.chats.append(entry)
     manifest.chats.sort(key=lambda c: (-c.message_count, c.title.lower()))
     _write(output_dir, manifest)

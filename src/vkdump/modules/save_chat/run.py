@@ -36,7 +36,7 @@ from ...parsers.vk.messages import (
 )
 from ...parsers.vk.pages import is_message_page_filename, list_message_pages
 from ...parsers.vk.sources import join as source_join
-from .index import upsert as upsert_index
+from .index import find_slug_for_chat, upsert as upsert_index
 from .pipeline import TransformContext, apply_pipeline
 from .transforms import DEFAULT_TRANSFORMS
 
@@ -53,6 +53,41 @@ _META_CHARSET_RE = re.compile(
 # We copy these per-chat-folder so each export dir is self-contained,
 # then rewrite stylesheet/script refs in the HTML to just the basename.
 _ASSET_EXTS = (".css", ".js")
+
+# Anything outside letters (any script, so Cyrillic counts) / digits
+# / one of these few safe punctuation marks gets collapsed to a single
+# `x` in the folder slug. `\w` already includes `_`; we add `-` and `.`
+# explicitly. Length-capped downstream.
+_TITLE_SAFE_RE = re.compile(r"[^\w\-.]+", re.UNICODE)
+_TITLE_MAX = 60  # leaves headroom under Windows MAX_PATH after the
+                 # "<chatid>_" prefix and the longest expected
+                 # `assets/<year>/photos/<sha[:2]>/<sha>.jpg` suffix.
+
+
+def _safe_title_slug(title: str | None) -> str:
+    """Sanitise a chat title for use inside a folder name.
+
+    Keeps Latin + Cyrillic letters (`\\w` under re.UNICODE), digits, `_`,
+    `-` and `.`. Runs of anything else collapse to a single `x` so the
+    result stays compact. Length-capped and trimmed.
+    """
+    if not title:
+        return ""
+    s = _TITLE_SAFE_RE.sub("x", title.strip())
+    # Strip leading dots / dashes so the folder doesn't read as hidden
+    # on POSIX or trip path-traversal heuristics.
+    s = s.lstrip(".-_x")[:_TITLE_MAX].rstrip(".-_x")
+    return s
+
+
+def _chat_folder_slug(chat_id: int, title: str | None) -> str:
+    """Combine the DB id with a sanitised title into the on-disk slug.
+    `chat_id` always leads so the folder is alphabetically stable and
+    re-exports of the same chat with a renamed title collide cleanly
+    on the chat_id prefix.
+    """
+    safe = _safe_title_slug(title)
+    return f"{chat_id}_{safe}" if safe else str(chat_id)
 
 
 def run(params: dict, progress: ProgressReporter) -> dict:
@@ -255,9 +290,15 @@ def _render_chat(
     #     <chat_id>/
     #       assets/<year>/photos/<sha[:2]>/...
     #       messages/messages0.html, messages1.html, …
-    # Slug = `chats.id` so two different accounts' chats with the same
-    # peer_id can't overwrite each other's folder.
-    chat_slug = str(chat_meta["id"])
+    # Slug = `<chats.id>_<sanitised title>` so two different accounts'
+    # chats with the same peer_id can't overwrite each other, and the
+    # folder name is human-skimmable. If this chat was exported here
+    # before under a different title, reuse the original slug instead
+    # of stranding the old folder.
+    chat_slug = (
+        find_slug_for_chat(output_dir, chat_meta["id"])
+        or _chat_folder_slug(chat_meta["id"], chat_meta.get("title"))
+    )
     chat_out = (output_dir / chat_slug).resolve()
     pages_dir = chat_out / "messages"
     pages_dir.mkdir(parents=True, exist_ok=True)
@@ -329,6 +370,7 @@ def _render_chat(
         type_=chat_meta["type"] or "?",
         message_count=int(chat_meta["message_count"] or 0),
         first_page=f"messages/{first_page_name}" if first_page_name else "",
+        chat_id=int(chat_meta["id"]),
     )
     progress.log(
         f"save-chat: wrote {chat_out} · index now lists {len(manifest.chats)} chat(s)"

@@ -22,6 +22,11 @@ a = Analysis(
 pyz = PYZ(a.pure)
 
 _ICNS = SPEC_DIR / "assets" / "icon.icns"
+_ICO = SPEC_DIR / "assets" / "icon.ico"
+if sys.platform == "win32":
+    _EXE_ICON = str(_ICO) if _ICO.is_file() else None
+else:
+    _EXE_ICON = str(_ICNS) if _ICNS.is_file() else None
 _BUNDLE_ICON = str(_ICNS) if _ICNS.is_file() else None
 
 exe = EXE(
@@ -36,7 +41,7 @@ exe = EXE(
     upx=False,
     console=False,
     disable_windowed_traceback=False,
-    icon=_BUNDLE_ICON,
+    icon=_EXE_ICON,
 )
 
 coll = COLLECT(

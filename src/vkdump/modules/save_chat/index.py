@@ -35,6 +35,12 @@ class ExportEntry:
     # reuse the original folder slug instead of stranding the old one.
     # Optional/zero for entries written before this field existed.
     chat_id: int = 0
+    # Filename of the per-chat photo-only gallery page, or "" when the
+    # chat has no downloaded photos and the page was skipped.
+    photos_page: str = ""
+    # Photo count surfaced on the index so the user can scan from the
+    # landing page without opening the gallery.
+    photos_count: int = 0
 
 
 @dataclass
@@ -86,6 +92,8 @@ def upsert(
     message_count: int,
     first_page: str = "",
     chat_id: int = 0,
+    photos_page: str = "",
+    photos_count: int = 0,
 ) -> ExportManifest:
     """Insert or update the manifest entry for `chat_slug`. Returns the
     updated manifest so the caller can re-render the HTML index.
@@ -100,6 +108,8 @@ def upsert(
         exported_at=_now(),
         first_page=first_page,
         chat_id=chat_id,
+        photos_page=photos_page,
+        photos_count=photos_count,
     )
     # Dedupe by slug AND by chat_id — covers the case where an earlier
     # export used a different slug for the same chat (e.g. before
@@ -137,8 +147,14 @@ def _render_html(manifest: ExportManifest) -> str:
         # the way VK's own index.html points at messages0.html), else
         # fall back to the chat folder.
         href = f"{slug}/{html_escape(c.first_page, quote=True)}" if c.first_page else f"{slug}/"
+        photos_link = (
+            f' · <a class="photos-link" href="{slug}/{html_escape(c.photos_page, quote=True)}">'
+            f'photos ({c.photos_count})</a>'
+            if c.photos_page else ""
+        )
         rows.append(
             f'<li><a href="{href}">{title}</a>'
+            f'{photos_link}'
             f' <span class="meta">· {c.type} · {c.message_count} messages'
             f' · {html_escape(c.peer_id)} · exported {html_escape(c.exported_at)}</span></li>'
         )
@@ -152,6 +168,7 @@ def _render_html(manifest: ExportManifest) -> str:
         "ul{list-style:none;padding:0}"
         "li{padding:8px 0;border-bottom:1px solid #eee}"
         "a{color:#0a66c2;text-decoration:none}a:hover{text-decoration:underline}"
+        ".photos-link{font-size:12px}"
         ".meta{color:#777;font-size:12px}"
         "</style>"
         "</head><body>"

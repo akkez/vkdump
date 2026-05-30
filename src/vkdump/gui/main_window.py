@@ -63,9 +63,11 @@ class MainWindow(QMainWindow):
             event.ignore()
 
     def _cancel_background_queries(self) -> None:
-        """Interrupt the Stats tab's SQLite rollups so multi-second
-        aggregations don't keep churning in the worker pool after the
-        window is gone.
+        """Interrupt the Stats tab's SQLite rollups and any in-flight
+        per-panel error polls so multi-hundred-ms SELECTs don't keep
+        churning in the worker pool after the window is gone.
         """
         if self._stats_view is not None:
             self._stats_view.cancel_all()
+        for p in self._task_panels:
+            p.cancel_background_queries()

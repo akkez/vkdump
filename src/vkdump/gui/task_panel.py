@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 from rich.text import Text
 
-from ..core.db import connection
+from ..core.db import CancelHandle, connection, set_active_cancel
 from ..tasks.spec import ParamSpec, TaskSpec
 from .widgets.aero_progress import AeroProgressGroup
 from .workers import TaskWorker
@@ -53,6 +53,54 @@ def _strip_markup(s: str) -> str:
         return Text.from_markup(s).plain
     except Exception:
         return s
+
+
+class _ErrorPollSignals(QObject):
+    done = Signal(int, int)  # parse_n, download_n
+
+
+class _ErrorPoll(QRunnable):
+    """Counts parse / download errors since `started_at` off the GUI
+    thread. The download-failed count is a full-scan on big DBs
+    (~600ms on a 2.4 GB store) — running it inline on the GUI thread
+    is what was eating frames during enrich runs.
+    """
+
+    def __init__(self, started_at: str) -> None:
+        super().__init__()
+        self.signals = _ErrorPollSignals()
+        self.cancel_handle = CancelHandle()
+        self._started_at = started_at
+
+    def cancel(self) -> None:
+        self.cancel_handle.cancel()
+
+    @Slot()
+    def run(self) -> None:
+        if self.cancel_handle.is_cancelled():
+            return
+        set_active_cancel(self.cancel_handle)
+        try:
+            with connection() as conn:
+                parse_n = conn.execute(
+                    "SELECT COUNT(*) FROM parse_errors WHERE created_at >= ?",
+                    (self._started_at,),
+                ).fetchone()[0]
+                download_n = conn.execute(
+                    "SELECT COUNT(*) FROM attachments"
+                    " WHERE download_status = 'failed'"
+                    "   AND download_attempted_at >= ?",
+                    (self._started_at,),
+                ).fetchone()[0]
+        except Exception:
+            return
+        finally:
+            set_active_cancel(None)
+        try:
+            self.signals.done.emit(int(parse_n or 0), int(download_n or 0))
+        except RuntimeError:
+            # Receiver torn down (window closed mid-flight).
+            pass
 
 
 class TaskPanel(QWidget):
@@ -112,6 +160,11 @@ class TaskPanel(QWidget):
         # SQLite-formatted UTC timestamp captured at Run start so the
         # poller can ignore failures from previous runs.
         self._run_started_at: str | None = None
+        # Single-flight handle for the off-thread error poll: skip new
+        # polls while one is already in the QThreadPool, otherwise on
+        # huge DBs (where one poll can take 500–700 ms) successive timer
+        # ticks pile up faster than the pool can drain them.
+        self._errors_inflight: _ErrorPoll | None = None
 
         # Stack of sub-progress bars (one per active `sub()` scope), kept
         # in a dedicated container so the layout can grow/shrink as the
@@ -444,26 +497,23 @@ class TaskPanel(QWidget):
         self._errors_timer.stop()
 
     def _poll_errors(self) -> None:
-        """Refresh the live error/failure counter shown by the progress
-        bars. Filtered to events that happened during this run, so the
-        label doesn't carry over yesterday's failures.
+        """Kick a background error-count refresh. The actual SQL happens
+        in a `_ErrorPoll` runnable so a 500–700 ms full-scan on a huge
+        DB doesn't freeze the GUI thread; the result lands via
+        `_on_errors_polled`. Single-flight: ignore the tick if the
+        previous poll is still running.
         """
         if self._run_started_at is None:
             return
-        try:
-            with connection() as conn:
-                parse_n = conn.execute(
-                    "SELECT COUNT(*) FROM parse_errors WHERE created_at >= ?",
-                    (self._run_started_at,),
-                ).fetchone()[0]
-                download_n = conn.execute(
-                    "SELECT COUNT(*) FROM attachments "
-                    " WHERE download_status = 'failed'"
-                    "   AND download_attempted_at >= ?",
-                    (self._run_started_at,),
-                ).fetchone()[0]
-        except Exception:
+        if self._errors_inflight is not None:
             return
+        poll = _ErrorPoll(self._run_started_at)
+        poll.signals.done.connect(self._on_errors_polled)
+        self._errors_inflight = poll
+        self._pool.start(poll)
+
+    def _on_errors_polled(self, parse_n: int, download_n: int) -> None:
+        self._errors_inflight = None
         chunks: list[str] = []
         if parse_n:
             chunks.append(f"{parse_n} parse errors")
@@ -475,6 +525,14 @@ class TaskPanel(QWidget):
         else:
             self._errors_label.setVisible(False)
             self._errors_label.setText("")
+
+    def cancel_background_queries(self) -> None:
+        """Interrupt any in-flight error-poll so a closing window
+        doesn't keep churning a multi-hundred-ms SELECT after the
+        receiver is gone.
+        """
+        if self._errors_inflight is not None:
+            self._errors_inflight.cancel()
 
     def _on_finished(self, run_id: int, result: object) -> None:
         self._status.setText(f"ok — run #{run_id}")

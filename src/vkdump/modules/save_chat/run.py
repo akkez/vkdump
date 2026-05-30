@@ -68,12 +68,16 @@ def _safe_title_slug(title: str | None) -> str:
     """Sanitise a chat title for use inside a folder name.
 
     Keeps Latin + Cyrillic letters (`\\w` under re.UNICODE), digits, `_`,
-    `-` and `.`. Runs of anything else collapse to a single `x` so the
-    result stays compact. Length-capped and trimmed.
+    `-` and `.`. Whitespace runs collapse to a single underscore (so
+    word boundaries stay readable). Runs of anything else collapse to
+    a single `x`. Length-capped and trimmed.
     """
     if not title:
         return ""
-    s = _TITLE_SAFE_RE.sub("x", title.strip())
+    # Whitespace → underscore first, so "Иван Петров" reads as
+    # "Иван_Петров" rather than "ИванxПетров".
+    s = re.sub(r"\s+", "_", title.strip())
+    s = _TITLE_SAFE_RE.sub("x", s)
     # Strip leading dots / dashes so the folder doesn't read as hidden
     # on POSIX or trip path-traversal heuristics.
     s = s.lstrip(".-_x")[:_TITLE_MAX].rstrip(".-_x")

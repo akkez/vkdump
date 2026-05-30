@@ -226,13 +226,18 @@ main{padding:16px 24px 64px}
 section.year{margin-bottom:24px;scroll-margin-top:120px}
 section.year h2{margin:8px 0 12px;font-size:16px;color:#444;font-weight:600}
 section.year h2 .count{color:#999;font-weight:400;font-size:12px}
-.gallery{column-count:4;column-gap:8px}
+.gallery{column-count:6;column-gap:8px}
+@media (max-width:1700px){.gallery{column-count:5}}
 @media (max-width:1400px){.gallery{column-count:4}}
 @media (max-width:1100px){.gallery{column-count:3}}
 @media (max-width:760px){.gallery{column-count:2}}
 @media (max-width:480px){.gallery{column-count:1}}
-.gallery figure{break-inside:avoid;margin:0 0 8px;background:#fff;border:1px solid #eee;border-radius:4px;overflow:hidden}
+.gallery figure{break-inside:avoid;margin:0 0 8px;background:#fff;border:1px solid #eee;border-radius:4px;overflow:hidden;text-align:center}
 .gallery a{display:block;line-height:0}
-.gallery img{width:100%;height:auto;display:block;background:#f0f0f0}
+/* Intrinsic-size cap: tiny pics keep their native pixels instead of
+   being stretched to fill the column. max-width clamps wide ones to
+   the column; the <img width/height> attrs feed the aspect ratio so
+   height is auto-computed and reserved before bytes arrive. */
+.gallery img{max-width:100%;height:auto;display:inline-block;background:#f0f0f0;vertical-align:middle}
 .gallery figcaption{font-size:11px;color:#888;padding:3px 6px;line-height:1.3}
 """

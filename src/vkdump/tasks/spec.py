@@ -19,6 +19,12 @@ class ParamSpec:
     # For type="choice" with options known only at form-build time
     # (e.g. populated from the DB). Called once per form rebuild.
     choices_provider: Callable[[], list[tuple[str, str]]] | None = None
+    # Optional dynamic default for any field type. Called once per form
+    # rebuild; if it returns a non-None value, it overrides `default`
+    # (e.g. pull "last used dump source" from app_config). Lets a task
+    # prefill cross-run remembered values without each one growing its
+    # own settings plumbing.
+    default_provider: Callable[[], Any] | None = None
 
 
 @dataclass

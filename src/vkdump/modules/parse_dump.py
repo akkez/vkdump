@@ -61,6 +61,16 @@ def run(params: dict, progress: ProgressReporter) -> dict:
     source_input = Path(params["source"]).expanduser()
     source_tz = (params.get("source_timezone") or "UTC").strip() or "UTC"
 
+    # Remember the absolute source path so downstream tasks (save-chat)
+    # can pre-fill their own dumpsource field from app_config instead of
+    # asking the user to re-type it. Saved before the heavy work so even
+    # a cancelled run leaves the hint behind.
+    try:
+        from ..core import app_config
+        app_config.set("parse_dump.last_source", str(source_input.resolve()))
+    except Exception:  # noqa: BLE001
+        pass
+
     discovery = discover(source_input)
     try:
         return _run_with_discovery(discovery, source_tz, progress)

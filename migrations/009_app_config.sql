@@ -1,0 +1,5 @@
+CREATE TABLE _app_config (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

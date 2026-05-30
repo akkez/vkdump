@@ -43,6 +43,22 @@ class _ClickyLineEdit(QLineEdit):
             self.clicked_when_empty.emit()
 
 
+def _resolve_default(p: ParamSpec) -> Any:
+    """Pick the value to seed an editor with at form-build time. The
+    `default_provider` callback wins when present (so a task can
+    prefill from `app_config` etc.); static `default` is the fallback.
+    A provider that raises or returns None falls back gracefully.
+    """
+    if p.default_provider is not None:
+        try:
+            v = p.default_provider()
+        except Exception:  # noqa: BLE001
+            v = None
+        if v is not None:
+            return v
+    return p.default
+
+
 def _strip_markup(s: str) -> str:
     """Drop Rich-style `[green]…[/green]` markup so it doesn't show up
     raw in Qt widgets. Rich's parser is a more robust stripper than a
@@ -218,12 +234,13 @@ class TaskPanel(QWidget):
         layout.addWidget(self._log, 1)
 
     def _make_editor(self, p: ParamSpec) -> QWidget:
+        initial = _resolve_default(p)
         if p.type in ("dir", "path", "path_any"):
             row = QWidget()
             line = _ClickyLineEdit() if p.type == "path_any" else QLineEdit()
             line.setObjectName(f"{p.name}__edit")
-            if p.default is not None:
-                line.setText(str(p.default))
+            if initial is not None:
+                line.setText(str(initial))
             line.setPlaceholderText(p.help or "")
             line.setMinimumWidth(420)
             line.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -278,12 +295,12 @@ class TaskPanel(QWidget):
         if p.type == "int":
             sb = QSpinBox()
             sb.setMaximum(2_000_000_000)
-            if p.default is not None:
-                sb.setValue(int(p.default))
+            if initial is not None:
+                sb.setValue(int(initial))
             return sb
         if p.type == "bool":
             cb = QCheckBox()
-            cb.setChecked(bool(p.default))
+            cb.setChecked(bool(initial))
             return cb
         if p.type == "choice":
             cb = QComboBox()
@@ -297,8 +314,8 @@ class TaskPanel(QWidget):
                     cb.addItem(f"<choices unavailable: {exc}>", "")
             for value, label in opts:
                 cb.addItem(label, value)
-            if p.default is not None:
-                idx = cb.findData(str(p.default))
+            if initial is not None:
+                idx = cb.findData(str(initial))
                 if idx >= 0:
                     cb.setCurrentIndex(idx)
             if len(opts) > 10:
@@ -339,8 +356,8 @@ class TaskPanel(QWidget):
                 )
             return cb
         line = QLineEdit()
-        if p.default is not None:
-            line.setText(str(p.default))
+        if initial is not None:
+            line.setText(str(initial))
         line.setPlaceholderText(p.help or "")
         return line
 

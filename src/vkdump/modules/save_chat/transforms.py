@@ -146,10 +146,11 @@ class InlinePhotosTransform:
             return html
         label = _build_alt(att.description, meta)
         alt = html_escape(label, quote=True)
-        # `title` mirrors alt so hovering the image surfaces the
-        # metadata; alt itself only renders when the image fails to
-        # load, which is rarely what the user wants to read.
-        title = alt
+        # Caption + title: title still set for browsers that surface it
+        # (some don't show it reliably — Firefox, as the user noticed),
+        # plus an always-visible caption strip under the image so the
+        # metadata is just *there* without a hover dance.
+        caption = html_escape(label, quote=False)
         href = html_escape(asset_href, quote=True)
         # Block-level wrapper with inline styles so we don't depend on
         # VK's own CSS: description/link in VK markup is inline, so
@@ -159,10 +160,13 @@ class InlinePhotosTransform:
         tag = (
             '<div class="vkdump-inline-photo"'
             ' style="display:block;margin:6px 0">'
-            f'<a href="{href}" title="{title}" style="display:inline-block">'
-            f'<img loading="lazy" src="{href}" alt="{alt}" title="{title}"'
+            f'<a href="{href}" title="{alt}" style="display:inline-block">'
+            f'<img loading="lazy" src="{href}" alt="{alt}" title="{alt}"'
             ' style="display:block;max-width:100%;height:auto">'
             '</a>'
+            f'<div class="vkdump-caption"'
+            ' style="font-size:11px;color:#888;margin-top:2px">'
+            f'{caption}</div>'
             '</div>'
         )
         return html[:m.start()] + tag + html[m.start():]

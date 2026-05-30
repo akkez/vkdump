@@ -24,7 +24,7 @@ from ...core.db import connection
 from ...core.i18n import plural
 from ...parsers.vk.models import KIND_PHOTO
 from .pipeline import TransformContext
-from .transforms import materialise_photo_asset
+from .transforms import _fmt_size, materialise_photo_asset
 
 # Pages live under `<chat>/gallery/` so the chat root stays at two
 # entries (`messages/` + `gallery/`) regardless of how many senders the
@@ -271,16 +271,22 @@ def _distribute_into_columns(
     return cols
 
 
-def _fmt_caption(p: _Photo) -> str:
-    """Compact one-line caption: date + resolution. Description is left
-    out — it's almost always the generic "Фотография" and just adds
-    noise across thousands of items.
+def _fmt_tooltip(p: _Photo, *, include_author: bool) -> str:
+    """Hover-only metadata strip: author (when this page mixes senders,
+    omitted on per-sender pages where it's redundant) · date · WxH ·
+    size. Nothing is rendered visibly under the thumbnails — the user
+    wanted the metadata behind a hover instead of cluttering the grid.
     """
     parts: list[str] = []
+    if include_author and p.sender_display_name:
+        parts.append(p.sender_display_name)
     if p.sent_at:
         parts.append(p.sent_at.strftime("%Y-%m-%d %H:%M"))
     if p.width and p.height:
         parts.append(f"{p.width}×{p.height}")
+    sz = _fmt_size(p.file_size)
+    if sz:
+        parts.append(sz)
     return " · ".join(parts)
 
 
@@ -328,6 +334,10 @@ def _render_html(
             f' <span class="count">({s.count})</span></a>'
         )
     sender_links = " ".join(sender_links_parts)
+    # `current is None` ⇒ main gallery page mixes senders, so the
+    # tooltip needs the author. Per-sender pages omit it (every photo
+    # on that page is by that one person).
+    include_author = current is None
     body_parts: list[str] = []
     for year, items in sections:
         cols = _distribute_into_columns(items)
@@ -341,7 +351,9 @@ def _render_html(
             body_parts.append('<div class="col">')
             for p in col:
                 href = html_escape(p.href, quote=True)
-                caption = html_escape(_fmt_caption(p))
+                tooltip = html_escape(
+                    _fmt_tooltip(p, include_author=include_author), quote=True
+                )
                 # Pre-declaring intrinsic size lets the browser reserve
                 # the aspect-ratio slot before the JPEG bytes arrive, so
                 # the column doesn't reflow as images stream in. Drops
@@ -351,13 +363,15 @@ def _render_html(
                     f' width="{p.width}" height="{p.height}"'
                     if p.width and p.height else ""
                 )
+                # Both <a> and <img> carry title= so any browser shows
+                # the tooltip whether the cursor lands on the image or
+                # its hit-area wrapper.
                 body_parts.append(
                     '<figure>'
-                    f'<a href="{href}">'
+                    f'<a href="{href}" title="{tooltip}">'
                     f'<img loading="lazy" decoding="async"'
-                    f' src="{href}" alt=""{size_attrs}>'
+                    f' src="{href}" alt="" title="{tooltip}"{size_attrs}>'
                     '</a>'
-                    f'<figcaption>{caption}</figcaption>'
                     '</figure>'
                 )
             body_parts.append('</div>')
@@ -419,5 +433,4 @@ section.year h2 .count{color:#999;font-weight:400;font-size:12px}
    the column; the <img width/height> attrs feed the aspect ratio so
    height is auto-computed and reserved before bytes arrive. */
 .gallery img{max-width:100%;height:auto;display:inline-block;background:#f0f0f0;vertical-align:middle}
-.gallery figcaption{font-size:11px;color:#888;padding:3px 6px;line-height:1.3}
 """

@@ -383,6 +383,18 @@ def _render_html(
         f"{html_escape(current.display_name)}</span>"
         if current else chat_title_html
     )
+    # Calendar-year span, not bucket count. "across 2 years" was misleading
+    # for a chat that had photos only in 2012 and 2016 — actual span is
+    # 5 years. Single-year chats just get the year.
+    year_ints = sorted({
+        p.sent_at.year for p in photos if p.sent_at is not None
+    })
+    if not year_ints:
+        span_label = "?"
+    elif year_ints[0] == year_ints[-1]:
+        span_label = str(year_ints[0])
+    else:
+        span_label = f"{year_ints[0]}–{year_ints[-1]}"
     return (
         "<!doctype html>\n"
         '<html lang="en"><head><meta charset="utf-8">'
@@ -393,7 +405,7 @@ def _render_html(
         f'<a class="back" href="{back_href}">{back_label}</a>'
         f'<h1>{heading}</h1>'
         f'<p class="summary">{html_escape(plural(total, "photo"))}'
-        f' across {html_escape(plural(len(sections), "year"))}</p>'
+        f' · {html_escape(span_label)}</p>'
         f'<nav class="sender-nav">{sender_links}</nav>'
         f'<nav class="year-nav">{year_links}</nav>'
         '</header>'

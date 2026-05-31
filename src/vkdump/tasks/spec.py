@@ -39,3 +39,8 @@ class TaskSpec:
     # button should reveal in the user's default browser. Returns
     # None / missing when the run produced nothing openable.
     result_open_path: Callable[[Any], Any] | None = None
+    # Whether a successful run can change DB rows that other panels'
+    # `choices_provider` queries read. True by default; set False for
+    # read-only tasks (stats) so finishing them doesn't trigger a
+    # repaint cascade across every tab.
+    mutates_data: bool = True

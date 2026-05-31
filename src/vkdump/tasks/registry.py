@@ -64,38 +64,57 @@ def _save_chat_open_path(result: dict) -> str | None:
 def _chat_scope_choices() -> list[tuple[str, str]]:
     """Populate the chat-scope dropdown from the DB at form-build time.
 
+    Filtered by ``app_config['active_account_id']`` when set: chats
+    from other accounts are hidden so the dropdown only shows what's
+    sensibly pickable in the current scope.
+
     Choice **value** is the chat's primary key (`chats.id`), not its
     `peer_id` — peer_id collides across multiple-account dumps (two
     different conversations can share `peer_id=2000000004` if they
-    came from different VK accounts). The id is unambiguous; downstream
-    code resolves the row by it. Label exposes account_id so the user
-    can tell duplicates apart at pick time.
+    came from different VK accounts). The id is unambiguous;
+    downstream code resolves the row by it.
     """
+    from ..core import app_config
     from ..core.db import connection
     out: list[tuple[str, str]] = [("", "All chats")]
+    active = app_config.get("active_account_id") or ""
     try:
         with connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, peer_id, account_id, title, type, message_count
-                  FROM chats
-                 WHERE peer_id IS NOT NULL AND peer_id != ''
-                 ORDER BY message_count DESC, id
-                 LIMIT 500
-                """
-            ).fetchall()
+            if active:
+                rows = conn.execute(
+                    """
+                    SELECT id, peer_id, account_id, title, type, message_count
+                      FROM chats
+                     WHERE peer_id IS NOT NULL AND peer_id != ''
+                       AND account_id = ?
+                     ORDER BY message_count DESC, id
+                     LIMIT 500
+                    """,
+                    (str(active),),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, peer_id, account_id, title, type, message_count
+                      FROM chats
+                     WHERE peer_id IS NOT NULL AND peer_id != ''
+                     ORDER BY message_count DESC, id
+                     LIMIT 500
+                    """
+                ).fetchall()
     except Exception:
         return out
     for r in rows:
         title = (r["title"] or "").strip() or "(untitled)"
         tag = r["type"] or "?"
-        acct = r["account_id"] or "?"
-        out.append(
-            (
-                str(r["id"]),
-                f"{title} — {tag} (acct={acct}, peer_id={r['peer_id']})",
-            )
-        )
+        # Hide the acct= chip when filtered — it'd be the same for every
+        # row and add nothing.
+        if active:
+            label = f"{title} — {tag} (peer_id={r['peer_id']})"
+        else:
+            acct = r["account_id"] or "?"
+            label = f"{title} — {tag} (acct={acct}, peer_id={r['peer_id']})"
+        out.append((str(r["id"]), label))
     return out
 
 
@@ -228,6 +247,7 @@ TASKS: list[TaskSpec] = [
         description="Brief summary: chats, users, messages, attachments by kind, top chats / senders, parse errors.",
         params=[],
         run=stats.run,
+        mutates_data=False,
     ),
 ]
 

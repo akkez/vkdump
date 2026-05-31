@@ -204,12 +204,21 @@ class TaskPanel(QWidget):
     panel per task and parks each in its own tab; there's no in-panel
     task switcher."""
 
+    # Fired after a successful run that may have mutated DB rows the
+    # other panels' `choices_provider`s read. The main window
+    # re-broadcasts this as a global `data_changed` so every panel can
+    # repopulate its dropdowns.
+    data_mutated = Signal()
+
     def __init__(self, task: TaskSpec, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._task = task
         self._pool = QThreadPool.globalInstance()
         self._active_worker: TaskWorker | None = None
         self._editors: dict[str, QWidget] = {}
+        self._params_by_name: dict[str, ParamSpec] = {
+            p.name: p for p in task.params
+        }
         # Original text of path inputs while a task is running; the
         # visible field gets collapsed to ".../<basename>" until the
         # run ends, then we restore from here.
@@ -677,6 +686,44 @@ class TaskPanel(QWidget):
         self._flush_progress_buffer()
         self._update_open_button(result)
         self._reset_buttons()
+        if self._task.mutates_data:
+            self.data_mutated.emit()
+
+    def refresh_choice_inputs(self) -> None:
+        """Re-run every `choice` param's `choices_provider` and rebuild
+        the matching combobox, preserving the user's current selection
+        when it's still a valid option. Called by the main window after
+        a `data_changed` broadcast so dropdowns track DB state without
+        a restart.
+        """
+        from PySide6.QtWidgets import QComboBox  # local — keep header light
+        for name, editor in self._editors.items():
+            if not isinstance(editor, QComboBox):
+                continue
+            p = self._params_by_name.get(name)
+            if p is None or p.choices_provider is None:
+                continue
+            current = editor.currentData()
+            new_opts = list(p.choices)
+            try:
+                new_opts.extend(p.choices_provider())
+            except Exception as exc:  # noqa: BLE001
+                # A failing provider mid-session shouldn't wipe the
+                # combo — log to the panel and keep the prior options.
+                self._log_buffer.append(
+                    f"choices_provider({p.name}) failed: {exc}"
+                )
+                self._flush_log_buffer()
+                continue
+            editor.blockSignals(True)
+            try:
+                editor.clear()
+                for value, label in new_opts:
+                    editor.addItem(label, value)
+                idx = editor.findData(current) if current is not None else -1
+                editor.setCurrentIndex(idx if idx >= 0 else 0)
+            finally:
+                editor.blockSignals(False)
 
     def _update_open_button(self, result: object) -> None:
         if self._open_btn is None or self._task.result_open_path is None:

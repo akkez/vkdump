@@ -1,3 +1,4 @@
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QMainWindow, QMessageBox, QTabWidget
 
 from ..tasks.registry import TASKS
@@ -7,6 +8,12 @@ from .task_panel import TaskPanel
 
 
 class MainWindow(QMainWindow):
+    # Broadcast by the main window when something happens that may have
+    # changed the rows other panels' `choices_provider`s read — either a
+    # task finished with `mutates_data=True`, or the user picked a new
+    # active account in Settings. Subscribers repopulate their combos.
+    data_changed = Signal()
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("VKdump")
@@ -26,12 +33,22 @@ class MainWindow(QMainWindow):
                 self._tabs.addTab(self._stats_view, "Stats")
             else:
                 panel = TaskPanel(task)
+                # Fan in each panel's per-run mutation signal into the
+                # window-level bus.
+                panel.data_mutated.connect(self.data_changed)
+                # Each panel listens to the bus so its dropdowns re-pull
+                # whenever any task finishes mutating DB rows or the
+                # user picks a new active account.
+                self.data_changed.connect(panel.refresh_choice_inputs)
                 self._task_panels.append(panel)
                 self._tabs.addTab(panel, task.title)
         # GUI-only Settings tab: not backed by a TaskSpec, lives at
-        # the very end. For now hosts just the active-account picker;
-        # other knobs (theme, DB location, …) will land here too.
-        self._tabs.addTab(SettingsView(), "Settings")
+        # the very end. Hosts the active-account picker; switching it
+        # narrows chat dropdowns elsewhere via the same bus.
+        self._settings_view = SettingsView()
+        self._settings_view.active_account_changed.connect(self.data_changed)
+        self.data_changed.connect(self._settings_view.refresh)
+        self._tabs.addTab(self._settings_view, "Settings")
 
         # Lazy-start the rollups: don't touch the DB until the user
         # actually opens the Stats tab. Free side-effect — if they

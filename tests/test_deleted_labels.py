@@ -4,7 +4,10 @@ Synthetic fixtures only — no real VK ids, names, or message bodies. The
 two-letter Cyrillic placeholder names "Aa Bb" / "Cc Dd" exercise the
 Unicode-uppercase rule without resembling any real archive.
 """
-from vkdump.core.deleted_labels import DeletedLabelPicker
+from vkdump.core.deleted_labels import (
+    DeletedLabelPicker,
+    format_combined_label,
+)
 
 
 def test_pick_pair_beats_single_and_at() -> None:
@@ -222,3 +225,77 @@ def test_feed_many_handles_none() -> None:
     p = DeletedLabelPicker([100])
     p.feed_many([None, "", "[id100|Aa Bb]"])
     assert p.pick(100) == ("Aa Bb", "pair")
+
+
+# ---- pick_multi + format_combined_label ----
+
+
+def test_pick_multi_returns_event_then_inline_pair() -> None:
+    p = DeletedLabelPicker([100])
+    p.feed_chat_event(_payload(
+        subtype="leave",
+        actor={"vk_id": 100, "display_name": "Aa Bb",
+               "profile_url": "https://vk.com/id100"},
+    ))
+    p.feed("[id100|Cc Dd]")
+    assert p.pick_multi(100) == [("Aa Bb", "event"), ("Cc Dd", "pair")]
+
+
+def test_pick_multi_dedupes_identical_label_across_buckets() -> None:
+    """When the same label wins in two buckets, only the higher-priority
+    bucket entry survives — no duplicates in the final list."""
+    p = DeletedLabelPicker([100])
+    p.feed_chat_event(_payload(
+        subtype="leave",
+        actor={"vk_id": 100, "display_name": "Aa Bb",
+               "profile_url": "https://vk.com/id100"},
+    ))
+    p.feed("[id100|Aa Bb]")
+    assert p.pick_multi(100) == [("Aa Bb", "event")]
+
+
+def test_pick_multi_empty_for_unknown_user() -> None:
+    p = DeletedLabelPicker([100])
+    assert p.pick_multi(100) == []
+    assert p.pick_multi(999) == []
+
+
+def test_pick_multi_collects_pair_at_single_when_no_event() -> None:
+    p = DeletedLabelPicker([100])
+    p.feed("[id100|Aa Bb]")
+    p.feed("[id100|@handle]")
+    p.feed("[id100|Mononym]")
+    picks = p.pick_multi(100)
+    assert picks == [
+        ("Aa Bb", "pair"),
+        ("@handle", "at"),
+        ("Mononym", "single"),
+    ]
+
+
+def test_pick_multi_ignores_re_run_output() -> None:
+    """Mentions / event names that look like a prior run's bracketed
+    output ('DELETED (...)') must not feed back into the picker —
+    otherwise re-runs would compound their own labels."""
+    p = DeletedLabelPicker([100])
+    p.feed("[id100|DELETED]")
+    p.feed("[id100|DELETED (Aa Bb)]")
+    p.feed_chat_event(_payload(
+        subtype="leave",
+        actor={"vk_id": 100, "display_name": "DELETED (Aa Bb)",
+               "profile_url": "https://vk.com/id100"},
+    ))
+    assert p.pick_multi(100) == []
+
+
+def test_format_combined_label_no_picks() -> None:
+    assert format_combined_label([]) == "DELETED"
+
+
+def test_format_combined_label_one_pick() -> None:
+    assert format_combined_label([("Aa Bb", "event")]) == "DELETED (Aa Bb)"
+
+
+def test_format_combined_label_two_picks_slash_joined() -> None:
+    picks = [("Aa Bb", "event"), ("Cc Dd", "pair")]
+    assert format_combined_label(picks) == "DELETED (Aa Bb / Cc Dd)"

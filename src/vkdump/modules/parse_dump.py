@@ -29,6 +29,7 @@ from typing import Callable, Iterable
 from loguru import logger
 
 from ..core.db import connection
+from ..core.deleted_labels import DeletedLabelPicker, format_combined_label
 from ..core.i18n import plural as _plural
 from ..core.progress import ProgressReporter, Throttle
 from ..parsers.vk import (
@@ -326,6 +327,8 @@ def _run_with_discovery(
             "messages*.html / index-messages.html / page-info.html file."
         )
 
+    deleted_enriched = _backfill_deleted_labels(progress)
+
     elapsed = time.perf_counter() - started_at
     aggregates = _aggregate_db_summary()
     return {
@@ -336,10 +339,68 @@ def _run_with_discovery(
         "chats_in_index": len(indexed_entries),
         "messages_inserted_this_run": total_messages,
         "errors_this_run": total_errors,
+        "deleted_users_enriched": deleted_enriched,
         "totals": aggregates["totals"],
         "top_chats": aggregates["top_chats"],
         "top_senders": aggregates["top_senders"],
     }
+
+
+def _backfill_deleted_labels(progress: ProgressReporter) -> int:
+    """Walk every inline `[id|label]` mention and every parsed
+    chat_event payload through ``DeletedLabelPicker``, then overwrite
+    ``users.display_name`` to ``'DELETED (Name / Other)'`` for every
+    deleted user with at least one recovered signal. Returns the
+    number of rows updated.
+
+    Runs as the last step of parse-dump so it sees every message and
+    every chat_event from the just-completed import. Pickers are
+    re-run-safe: their internal filters skip the bracketed output a
+    previous run wrote, so labels don't compound.
+    """
+    with connection() as conn:
+        deleted = {
+            int(r[0]) for r in conn.execute(
+                "SELECT vk_id FROM users"
+                " WHERE provider=? AND is_deleted=1 AND vk_id IS NOT NULL",
+                (PROVIDER,),
+            )
+        }
+        if not deleted:
+            return 0
+
+        picker = DeletedLabelPicker(deleted)
+        for (t,) in conn.execute(
+            "SELECT text FROM messages WHERE text LIKE '%[id%' AND text<>''"
+        ):
+            picker.feed(t)
+        for (jd,) in conn.execute(
+            "SELECT data_json FROM attachments"
+            " WHERE kind='chat_event' AND data_json IS NOT NULL"
+        ):
+            try:
+                payload = json.loads(jd)
+            except json.JSONDecodeError:
+                continue
+            picker.feed_chat_event(payload)
+
+        updated = 0
+        for vk_id in deleted:
+            picks = picker.pick_multi(vk_id)
+            if not picks:
+                continue
+            label = format_combined_label(picks)
+            conn.execute(
+                "UPDATE users SET display_name=?"
+                " WHERE provider=? AND vk_id=? AND is_deleted=1",
+                (label, PROVIDER, vk_id),
+            )
+            updated += 1
+    progress.log(
+        f"deleted-labels: enriched {updated}/{len(deleted)} deleted users"
+        " with names from chat-event payloads and inline mentions"
+    )
+    return updated
 
 
 def _aggregate_db_summary() -> dict:

@@ -131,6 +131,36 @@ def _starts_with_upper(word: str) -> bool:
     return bool(word) and unicodedata.category(word[0]).startswith("Lu")
 
 
+def _is_real_label(label: str) -> bool:
+    """False for placeholders we don't want to count as a recovered
+    name: the literal ``"DELETED"`` and re-runs of our own bracketed
+    output (``"DELETED (...)"``). Everything else passes through —
+    bucket-specific filtering happens later in :meth:`pick_multi`.
+    """
+    if not label:
+        return False
+    if label == "DELETED":
+        return False
+    if label.startswith("DELETED (") or label.startswith("DELETED("):
+        return False
+    return True
+
+
+def format_combined_label(picks: list[tuple[str, "Bucket"]]) -> str:
+    """Render a list of :meth:`DeletedLabelPicker.pick_multi` picks into
+    the canonical ``users.display_name`` form: ``"DELETED (a / b)"``
+    when there is at least one pick, or the bare ``"DELETED"`` when
+    there is none. ``DELETED`` stays as the leading token in either
+    case so existing call sites that filter on that prefix keep
+    working. ``" / "`` separator avoids ambiguity when the names
+    themselves contain spaces or commas.
+    """
+    if not picks:
+        return "DELETED"
+    names = " / ".join(label for label, _ in picks)
+    return f"DELETED ({names})"
+
+
 class DeletedLabelPicker:
     """Stateful scanner. Feed it message texts and chat_event payloads,
     then ask for picks.
@@ -152,8 +182,12 @@ class DeletedLabelPicker:
             return
         for m in _MENTION.finditer(text):
             vk_id = int(m.group(1))
-            if vk_id in self._deleted:
-                self._counts[vk_id][m.group(2)] += 1
+            if vk_id not in self._deleted:
+                continue
+            label = m.group(2)
+            if not _is_real_label(label):
+                continue
+            self._counts[vk_id][label] += 1
 
     def feed_many(self, texts: Iterable[str | None]) -> None:
         for t in texts:
@@ -182,7 +216,7 @@ class DeletedLabelPicker:
             if vid is None or vid not in self._deleted:
                 continue
             name = (u.get("display_name") or "").strip()
-            if name and name != "DELETED":
+            if _is_real_label(name):
                 self._event_counts[vid][name] += 1
 
         subtype = payload.get("subtype")
@@ -204,13 +238,13 @@ class DeletedLabelPicker:
 
         actor = payload.get("actor") or {}
         actor_vid = actor.get("vk_id") if isinstance(actor, dict) else None
-        if actor_vid in self._deleted and actor_name and actor_name != "DELETED":
+        if actor_vid in self._deleted and _is_real_label(actor_name):
             self._event_counts[actor_vid][actor_name] += 1
 
         if has_target:
             target = payload.get("target") or {}
             target_vid = target.get("vk_id") if isinstance(target, dict) else None
-            if target_vid in self._deleted and target_name and target_name != "DELETED":
+            if target_vid in self._deleted and _is_real_label(target_name):
                 self._event_counts[target_vid][target_name] += 1
 
     def mentions(self, vk_id: int) -> Counter[str]:
@@ -263,6 +297,79 @@ class DeletedLabelPicker:
                 return label, "single"
 
         return "DELETED", "fallback"
+
+    def pick_multi(self, vk_id: int) -> list[tuple[str, Bucket]]:
+        """Return one pick per non-empty source bucket for ``vk_id``,
+        ordered ``event`` → ``pair`` → ``at`` → ``single``, deduplicated
+        by label (a label that won in two buckets only appears once,
+        attributed to the higher-priority bucket).
+
+        Empty list when the user has no usable signal anywhere — the
+        caller can render that as a bare ``"DELETED"``.
+
+        Bucket selection rules (per source):
+        - ``event``: prefer a two-word capitalised pair; else the most
+          frequent label.
+        - ``pair``: most-frequent two-word capitalised label not
+          starting with ``@`` / ``*``.
+        - ``at``: most-frequent ``@handle``, excluding ``@id<num>``.
+        - ``single``: most-frequent single capitalised word not
+          starting with ``@`` / ``*``.
+        """
+        picks: list[tuple[str, Bucket]] = []
+        seen: set[str] = set()
+
+        event_ranked = self._ranked(self._event_counts.get(vk_id))
+        chosen_event: str | None = None
+        for label, _ in event_ranked:
+            words = label.split()
+            if (
+                len(words) >= 2
+                and _starts_with_upper(words[0])
+                and _starts_with_upper(words[1])
+            ):
+                chosen_event = label
+                break
+        if chosen_event is None and event_ranked:
+            chosen_event = event_ranked[0][0]
+        if chosen_event is not None and chosen_event not in seen:
+            picks.append((chosen_event, "event"))
+            seen.add(chosen_event)
+
+        ranked = self._ranked(self._counts.get(vk_id))
+
+        for label, _ in ranked:
+            if label.startswith(("@", "*")):
+                continue
+            words = label.split()
+            if (
+                len(words) == 2
+                and _starts_with_upper(words[0])
+                and _starts_with_upper(words[1])
+            ):
+                if label not in seen:
+                    picks.append((label, "pair"))
+                    seen.add(label)
+                break
+
+        for label, _ in ranked:
+            if label.startswith("@") and not label.startswith("@id"):
+                if label not in seen:
+                    picks.append((label, "at"))
+                    seen.add(label)
+                break
+
+        for label, _ in ranked:
+            if label.startswith(("@", "*")):
+                continue
+            words = label.split()
+            if len(words) == 1 and _starts_with_upper(words[0]):
+                if label not in seen:
+                    picks.append((label, "single"))
+                    seen.add(label)
+                break
+
+        return picks
 
     def picks(self) -> dict[int, tuple[str, Bucket]]:
         """All picks for every vk_id registered in the constructor —

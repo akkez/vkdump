@@ -204,10 +204,6 @@ def save_chat_cmd(
             help="The same VK dump (ZIP or extracted) you fed to parse-dump.",
         ),
     ],
-    chat: Annotated[
-        str,
-        typer.Argument(help="`chats.id` of the chat to render (primary key — unambiguous across accounts; see `vkdump stats`)."),
-    ],
     output: Annotated[
         Path,
         typer.Option(
@@ -215,8 +211,14 @@ def save_chat_cmd(
             help="Folder where per-chat subfolders + index.html will live. Reused across runs.",
         ),
     ],
+    chat: Annotated[
+        str,
+        typer.Argument(
+            help="`chats.id` of the chat to render. Omit (or pass an empty string) to render every chat in the DB.",
+        ),
+    ] = "",
 ) -> None:
-    """Render one chat's HTML with locally-downloaded photos inlined."""
+    """Render chat(s) HTML with locally-downloaded photos inlined."""
     _run("save-chat", {"source": source, "chat": chat, "output": output})
 
 

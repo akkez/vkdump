@@ -98,10 +98,8 @@ def _chat_folder_slug(chat_id: int, title: str | None) -> str:
 
 def run(params: dict, progress: ProgressReporter) -> dict:
     source_input = Path(params["source"]).expanduser()
-    chat_pick = str(params["chat"]).strip()
+    chat_pick = str(params.get("chat") or "").strip()
     output_input = Path(params["output"]).expanduser()
-    if not chat_pick:
-        raise ValueError("Chat is required")
     output_dir = output_input.resolve()
 
     # Remember inputs so the next save-chat run pre-fills them.
@@ -112,25 +110,114 @@ def run(params: dict, progress: ProgressReporter) -> dict:
     except Exception:  # noqa: BLE001
         pass
 
-    # The picker hands us `chats.id` (unambiguous across accounts).
-    try:
-        chat_id = int(chat_pick)
-    except ValueError as exc:
-        raise ValueError(f"Bad chat id from picker: {chat_pick!r}") from exc
-    chat_meta = _lookup_chat(chat_id)
-    if chat_meta is None:
-        raise ValueError(f"No chat in DB with id={chat_id}")
+    if chat_pick:
+        try:
+            chat_id = int(chat_pick)
+        except ValueError as exc:
+            raise ValueError(f"Bad chat id from picker: {chat_pick!r}") from exc
+        meta = _lookup_chat(chat_id)
+        if meta is None:
+            raise ValueError(f"No chat in DB with id={chat_id}")
+        chat_metas = [meta]
+    else:
+        chat_metas = _lookup_all_chats()
+        if not chat_metas:
+            raise ValueError(
+                "No chats with messages in the DB — parse-dump first."
+            )
+        progress.log(
+            f"save-chat: 'All chats' mode — {len(chat_metas)} candidate chats"
+        )
 
     discovery = discover(source_input)
     try:
-        return _render_chat(
+        if chat_pick:
+            # Specific chat — propagate errors so the user sees them
+            # immediately (e.g. wrong dump for the picked chat).
+            return _render_chat(
+                discovery=discovery,
+                chat_meta=chat_metas[0],
+                output_dir=output_dir,
+                progress=progress,
+            )
+        return _render_many(
             discovery=discovery,
-            chat_meta=chat_meta,
+            chat_metas=chat_metas,
             output_dir=output_dir,
             progress=progress,
         )
     finally:
         discovery.source.close()
+
+
+def _render_many(
+    *,
+    discovery,
+    chat_metas: list[dict],
+    output_dir: Path,
+    progress: ProgressReporter,
+) -> dict:
+    """Render each chat in turn, swallowing per-chat failures so one bad
+    chat (e.g. wrong account, missing folder) doesn't abort the rest.
+    """
+    rendered: list[dict] = []
+    skipped: list[dict] = []
+    total = len(chat_metas)
+    for i, chat_meta in enumerate(chat_metas, start=1):
+        progress.check_cancelled()
+        label = (chat_meta.get("title") or chat_meta.get("source_folder") or
+                 f"id={chat_meta['id']}")
+        progress.log(f"[{i}/{total}] save-chat: {label}")
+        try:
+            r = _render_chat(
+                discovery=discovery,
+                chat_meta=chat_meta,
+                output_dir=output_dir,
+                progress=progress,
+            )
+            rendered.append(r)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("save-chat: chat id=%s failed", chat_meta["id"])
+            progress.log(
+                f"[{i}/{total}] save-chat: skipped id={chat_meta['id']}: {exc}"
+            )
+            skipped.append({
+                "chat_id": chat_meta["id"],
+                "title": chat_meta.get("title"),
+                "peer_id": chat_meta.get("peer_id"),
+                "error": str(exc),
+            })
+
+    photo_mentions = sum(r.get("photo_mentions") or 0 for r in rendered)
+    photo_inlined = sum(r.get("photo_inlined") or 0 for r in rendered)
+    photo_unique = sum(r.get("photo_unique_files") or 0 for r in rendered)
+    photos_count = sum(r.get("photos_count") or 0 for r in rendered)
+    progress.log(
+        f"save-chat: done — {len(rendered)} chats rendered, {len(skipped)} skipped;"
+        f" {photo_inlined}/{photo_mentions} photo mentions inlined"
+    )
+    return {
+        "mode": "all-chats",
+        "chats_total": total,
+        "chats_rendered": len(rendered),
+        "chats_skipped": len(skipped),
+        "skipped": skipped[:50],
+        "output_dir": str(output_dir),
+        "photo_mentions": photo_mentions,
+        "photo_inlined": photo_inlined,
+        "photo_unique_files": photo_unique,
+        "photos_count": photos_count,
+        "per_chat": [
+            {
+                "chat_slug": r.get("chat_slug"),
+                "peer_id": r.get("peer_id"),
+                "pages": r.get("pages"),
+                "photo_inlined": r.get("photo_inlined"),
+                "photo_mentions": r.get("photo_mentions"),
+            }
+            for r in rendered
+        ],
+    }
 
 
 # ---------- internals ----------
@@ -213,6 +300,23 @@ def _lookup_chat(chat_id: int) -> dict | None:
             (chat_id,),
         ).fetchone()
     return dict(row) if row else None
+
+
+def _lookup_all_chats() -> list[dict]:
+    """Every chat with at least one parsed message. Ordered by
+    message_count desc so a partial run renders the biggest chats first.
+    Empty / vanity-slug `peer_id` chats are still included — the renderer
+    keys off `source_folder`, not peer_id, when locating pages.
+    """
+    with connection() as conn:
+        rows = conn.execute(
+            "SELECT id, peer_id, account_id, provider, title, type,"
+            " source_folder, message_count"
+            " FROM chats"
+            " WHERE message_count > 0"
+            " ORDER BY message_count DESC, id"
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def _build_url_meta(chat_id: int) -> dict[str, AttMeta]:
@@ -339,7 +443,6 @@ def _render_chat(
     total = len(pages)
     throttle = Throttle()
     blocks_total = 0
-    blocks_changed = 0
     first_page_name = ""
     progress.report(0, total, "Rendering pages…")
     for i, page_rel in enumerate(pages, start=1):
@@ -352,9 +455,8 @@ def _render_chat(
             logger.exception("save-chat: failed to read {}", page_rel)
             progress.log(f"save-chat: skipping {page_rel}: {exc}")
             continue
-        new_html, n_blocks, n_changed = _transform_page(html, page_rel, ctx)
+        new_html, n_blocks, _ = _transform_page(html, page_rel, ctx)
         blocks_total += n_blocks
-        blocks_changed += n_changed
         # Rewrite the source's `<meta charset=windows-1251>` to utf-8
         # so the browser doesn't mojibake what we just decoded cleanly.
         new_html = _META_CHARSET_RE.sub(r"\1utf-8\3", new_html)
@@ -365,14 +467,17 @@ def _render_chat(
         if not first_page_name:
             first_page_name = page_name
         if throttle(i, total):
+            injected_so_far = ctx.injected_by_kind.get("photo", 0)
             progress.report(
                 i, total,
-                f"page {i}/{total} · blocks {blocks_total} · inlined {blocks_changed}",
+                f"page {i}/{total} · blocks {blocks_total}"
+                f" · photos inlined {injected_so_far}",
             )
 
+    photos_done = ctx.injected_by_kind.get("photo", 0)
     progress.report(
         total, total,
-        f"done · {blocks_total} blocks · {blocks_changed} inlined",
+        f"done · {blocks_total} blocks · {photos_done} photos inlined",
     )
 
     # Match-rate summary. Counters were bumped during the render pass
@@ -441,7 +546,6 @@ def _render_chat(
         "peer_id": str(chat_meta["peer_id"]),
         "pages": total,
         "blocks": blocks_total,
-        "blocks_changed": blocks_changed,
         "output_dir": str(output_dir),
         "chat_dir": str(chat_out),
         "assets_copied": len(ctx.copied_assets),

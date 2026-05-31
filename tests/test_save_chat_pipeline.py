@@ -14,7 +14,12 @@ import pytest
 
 from vkdump.modules.save_chat.pipeline import AttMeta, TransformContext
 from vkdump.modules.save_chat.run import _transform_page
-from vkdump.modules.save_chat.transforms import InlinePhotosTransform
+from vkdump.modules.save_chat.transforms import (
+    InlinePhotosTransform,
+    MessageAnchorTransform,
+)
+from vkdump.modules.save_chat.pipeline import apply_pipeline
+from vkdump.parsers.vk.models import ParsedMessage
 
 
 def _msg_block(msg_id: int, header: str, body_inner: str) -> str:
@@ -103,10 +108,13 @@ def test_two_photos_in_one_message_both_inject(ctx: TransformContext) -> None:
     new_html, blocks, changed = _transform_page(html, "t.html", ctx)
     assert blocks == 1
     assert changed == 1
-    # Two injects (one per photo), both original links preserved.
     assert new_html.count("vkdump-inline-photo") == 2
     assert new_html.count("<img") == 2
-    assert new_html.count("attachment__link") == 2
+    # Original `attachment__link` anchors are absorbed into the caption
+    # chip; the URL is preserved as the chip's href.
+    assert "attachment__link" not in new_html
+    assert 'href="https://cdn.example.com/a.jpg?size=100x100"' in new_html
+    assert 'href="https://cdn.example.com/b.jpg?size=200x200"' in new_html
     # And the local hrefs point at the right bucketed files, relative
     # to messages/ (one level up = chat root).
     assert "../assets/2024/photos/aa/aa00aa00aa00aa00.jpg" in new_html
@@ -118,25 +126,30 @@ def test_photo_mixed_with_file_attachment_only_photo_injects(ctx: TransformConte
          + _file_attachment("https://example.com/doc.pdf")
     html = _page([_msg_block(42, "Вы, 1 янв 2024 в 12:00:00", body)])
     new_html, _, _ = _transform_page(html, "t.html", ctx)
-    # Photo: one inject. File: untouched (we don't download files yet).
+    # Photo: one inject + photo's anchor absorbed into chip.
+    # File: untouched (we don't download files yet) — its anchor stays.
     assert new_html.count("vkdump-inline-photo") == 1
     assert "doc.pdf" in new_html  # original file link preserved verbatim
-    assert new_html.count("attachment__link") == 2
+    assert new_html.count("attachment__link") == 1
 
 
-def test_message_without_attachments_is_unchanged(ctx: TransformContext) -> None:
+def test_message_without_attachments_gets_anchor_only(ctx: TransformContext) -> None:
     body = "просто текст без аттачей"
     html = _page([_msg_block(42, "Вы, 1 янв 2024 в 12:00:00", body)])
     new_html, _, changed = _transform_page(html, "t.html", ctx)
-    assert changed == 0
-    assert new_html == html  # byte-identical
+    # Anchor transform stamps an id regardless of attachments.
+    assert changed == 1
+    assert 'id="m42"' in new_html
+    assert "vkdump-inline-photo" not in new_html
 
 
 def test_photo_without_local_file_is_skipped(ctx: TransformContext) -> None:
     body = _photo_attachment("https://cdn.example.com/never-downloaded.jpg")
     html = _page([_msg_block(42, "Вы, 1 янв 2024 в 12:00:00", body)])
     new_html, _, changed = _transform_page(html, "t.html", ctx)
-    assert changed == 0
+    # Anchor still injected; inline-photos is the one that no-ops here.
+    assert changed == 1
+    assert 'id="m42"' in new_html
     assert "vkdump-inline-photo" not in new_html
     assert "never-downloaded.jpg" in new_html
     # URL not in url_to_meta at all → counted as candidate only.
@@ -201,7 +214,9 @@ def test_multi_message_page_preserves_order_and_ids(ctx: TransformContext) -> No
     new_html, blocks, changed = _transform_page(html, "t.html", ctx)
 
     assert blocks == 4
-    assert changed == 3  # only the photo messages
+    # All four are mutated: anchor transform stamps an id on every msg,
+    # photo transform additionally injects on the three with photos.
+    assert changed == 4
 
     # IDs must appear in original order, no shuffling.
     positions = [new_html.index(f'data-id="{mid}"') for mid in msg_ids]
@@ -244,9 +259,12 @@ def test_dates_stay_attached_to_their_message_ids(ctx: TransformContext) -> None
         )
 
 
-def test_byte_for_byte_when_no_attachments_match(ctx: TransformContext) -> None:
-    """When nothing gets injected, the output must be byte-identical to
-    the input. This is the strongest guarantee against splice drift."""
+def test_anchor_injected_even_without_inlineable_attachments(
+    ctx: TransformContext,
+) -> None:
+    """Inline-photos has nothing to do (no photo attachments), but the
+    anchor transform always stamps `id="m<vk_id>"` on every message div
+    so deep links work regardless of media."""
     body = _file_attachment("https://example.com/doc.pdf") \
          + "<p>some other markup</p>"
     blocks_html = [
@@ -255,7 +273,11 @@ def test_byte_for_byte_when_no_attachments_match(ctx: TransformContext) -> None:
     ]
     html = _page(blocks_html)
     new_html, _, _ = _transform_page(html, "t.html", ctx)
-    assert new_html == html
+    assert 'id="m1"' in new_html
+    assert 'id="m2"' in new_html
+    # data-id stays — anchor sits alongside, doesn't replace.
+    assert 'data-id="1"' in new_html
+    assert 'data-id="2"' in new_html
 
 
 # ---------- counters ----------
@@ -274,23 +296,171 @@ def test_counters_count_per_attachment_not_per_block(ctx: TransformContext) -> N
     assert ctx.injected_by_kind.get("photo") == 2
 
 
+# ---------- URL compression on inline ----------
+
+
+def test_inline_photo_compresses_original_anchor_to_hostname_chip(
+    ctx: TransformContext,
+) -> None:
+    """The original `<a href="<URL>"><URL></a>` is replaced by a small
+    hostname chip inside the caption whose href is the full URL —
+    visual cleanup without info loss."""
+    url = "https://cdn.example.com/a.jpg?size=100x100"
+    body = _photo_attachment(url)
+    html = _page([_msg_block(42, "Вы, 1 янв 2024 в 12:00:00", body)])
+    new_html, _, _ = _transform_page(html, "t.html", ctx)
+    # Original full-URL link text is gone (no naked huge URL).
+    assert f">{url}</a>" not in new_html
+    assert "attachment__link" not in new_html
+    # New compact link present: href preserved, text is hostname only.
+    assert f'href="{url}"' in new_html
+    assert ">cdn.example.com</a>" in new_html
+
+
+def test_inline_photo_leaves_anchor_alone_when_text_doesnt_match(
+    ctx: TransformContext,
+) -> None:
+    """If VK ever ships a link whose visible text isn't a verbatim copy
+    of href, the compact-link branch must bail and leave the original
+    anchor untouched — consistency rule: both transformations apply or
+    neither does."""
+    url = "https://cdn.example.com/a.jpg?size=100x100"
+    # Hand-crafted attachment block where the anchor's text contains a
+    # `<` character so the `[^<]*` text capture inside `_full_link_re`
+    # fails. `link_re` still matches the opening tag → image still
+    # injects, but the chip-link path bails.
+    weird_anchor = (
+        '<div class="attachment">'
+        '<div class="attachment__description">Фотография</div>'
+        f"<a class='attachment__link' href='{url}'>not-a-url <span/>tail</a>"
+        '</div>'
+    )
+    html = _page([_msg_block(
+        99, "Вы, 1 янв 2024 в 12:00:00", weird_anchor,
+    )])
+    new_html, _, _ = _transform_page(html, "t.html", ctx)
+    # Image still injected (link_re matches the opening — that path is
+    # independent of the full-link regex).
+    assert "vkdump-inline-photo" in new_html
+    # Hostname chip NOT added — full-link match failed.
+    assert ">cdn.example.com</a>" not in new_html
+    # Original anchor still there.
+    assert "not-a-url" in new_html
+
+
+# ---------- description-strip on inline ----------
+
+
+def test_inline_photo_swallows_attachment_description(ctx: TransformContext) -> None:
+    """`<div class="attachment__description">Photo</div>` sits above
+    every `<a class="attachment__link">` in VK markup. When we inline
+    the photo, that label becomes redundant — the <img> + the caption
+    strip below carry the same info — and must be stripped."""
+    body = _photo_attachment("https://cdn.example.com/a.jpg?size=100x100")
+    html = _page([_msg_block(42, "Вы, 1 янв 2024 в 12:00:00", body)])
+    new_html, _, _ = _transform_page(html, "t.html", ctx)
+    # The label is gone for the inlined photo.
+    assert ">Фотография<" not in new_html
+    assert ">Photo<" not in new_html
+    # The URL is preserved as the caption chip's href.
+    assert 'href="https://cdn.example.com/a.jpg?size=100x100"' in new_html
+
+
+def test_description_kept_when_inline_is_skipped(ctx: TransformContext) -> None:
+    """Description stays put when no inline happens (photo had no local
+    file), otherwise other-kind attachments (file, audio, ...) would
+    lose their only label too."""
+    body = _photo_attachment("https://cdn.example.com/never-downloaded.jpg")
+    html = _page([_msg_block(42, "Вы, 1 янв 2024 в 12:00:00", body)])
+    new_html, _, _ = _transform_page(html, "t.html", ctx)
+    assert ">Фотография<" in new_html
+
+
+def test_description_kept_for_non_photo_attachments(ctx: TransformContext) -> None:
+    """File / audio / other-kind attachments are not inlined, so their
+    description label must survive untouched."""
+    body = _file_attachment("https://example.com/doc.pdf", label="Файл")
+    html = _page([_msg_block(42, "Вы, 1 янв 2024 в 12:00:00", body)])
+    new_html, _, _ = _transform_page(html, "t.html", ctx)
+    assert ">Файл<" in new_html
+
+
+# ---------- anchor transform ----------
+
+
+def _bare_msg(vk_id: int, raw_html: str | None = None) -> ParsedMessage:
+    """Minimal ParsedMessage suitable for testing transforms in isolation
+    (no DB, no real parse). Only the fields the transform reads matter."""
+    from datetime import datetime
+    return ParsedMessage(
+        vk_message_id=vk_id,
+        sent_at=datetime(2024, 1, 1, 12, 0, 0),
+        sender_vk_id=None,
+        sender_display_name=None,
+        sender_is_self=False,
+        text="",
+        attachments=[],
+        has_forwards=False,
+        forwarded_count=0,
+        is_reply=False,
+        reply_to_message_id=None,
+        is_edited=False,
+        edited_at=None,
+        raw_html=(
+            raw_html
+            if raw_html is not None
+            else f'<div class="message" data-id="{vk_id}"><p>x</p></div>'
+        ),
+        source_file="t.html",
+        fully_parsed=True,
+    )
+
+
+def test_anchor_transform_adds_id(ctx: TransformContext) -> None:
+    msg = _bare_msg(361522)
+    MessageAnchorTransform().apply(msg, ctx)
+    assert 'data-id="361522"' in msg.raw_html
+    assert 'id="m361522"' in msg.raw_html
+
+
+def test_anchor_transform_only_first_match(ctx: TransformContext) -> None:
+    """Nested message divs (unlikely but possible in malformed dumps)
+    must not get a second id — the anchor only stamps the outer block."""
+    raw = (
+        '<div class="message" data-id="1"><div>'
+        '<div class="message" data-id="2">inner</div>'
+        '</div></div>'
+    )
+    msg = _bare_msg(1, raw_html=raw)
+    MessageAnchorTransform().apply(msg, ctx)
+    assert msg.raw_html.count('id="m1"') == 1
+    assert 'id="m2"' not in msg.raw_html
+
+
+def test_anchor_transform_noop_on_already_anchored(ctx: TransformContext) -> None:
+    """If the markup already has the id attribute (e.g. re-running
+    save-chat over a prior output), the regex still only adds id once —
+    not catastrophic, but worth pinning behavior."""
+    raw = '<div class="message" data-id="42" id="m42">hi</div>'
+    msg = _bare_msg(42, raw_html=raw)
+    MessageAnchorTransform().apply(msg, ctx)
+    assert msg.raw_html.count('id="m42"') == 1
+
+
 # ---------- known-edge / open question ----------
 
 
-def test_same_url_twice_in_one_message_known_limitation(ctx: TransformContext) -> None:
-    """Documents current behaviour for the rare same-URL-twice case
-    (e.g. a forwarded photo quoted twice in the same message). The
-    regex-based injector finds the first occurrence both times, so
-    the second `<a>` never gets the image — but the page stays
-    structurally valid. If this becomes a real problem we'll switch
-    to a finditer-based pass that tracks per-URL ordinal."""
+def test_same_url_twice_in_one_message(ctx: TransformContext) -> None:
+    """Same URL appearing twice in one message (rare — e.g. a forwarded
+    photo quoted twice). Each loop iteration absorbs whichever original
+    anchor sits first in the current html, so by the end both originals
+    are replaced and the page has two inline blocks."""
     url = "https://cdn.example.com/a.jpg?size=100x100"
     body = _photo_attachment(url) + _photo_attachment(url)
     html = _page([_msg_block(42, "Вы, 1 янв 2024 в 12:00:00", body)])
     new_html, _, _ = _transform_page(html, "t.html", ctx)
-    # Both original links survive (no replacement, just injection).
-    assert new_html.count(f"href='{url}'") == 2
-    # Current behaviour: first link gets two stacked injections, the
-    # second one stays bare. If this ever changes to "one inject per
-    # occurrence" the test will break and we update the assertion.
+    # Both originals consumed; only the chip-style links remain.
+    assert "attachment__link" not in new_html
     assert new_html.count("vkdump-inline-photo") == 2
+    # URL survives via the two chips' href attributes.
+    assert new_html.count(f'href="{url}"') == 2

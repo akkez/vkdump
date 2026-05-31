@@ -61,14 +61,6 @@ def _save_chat_open_path(result: dict) -> str | None:
     return str(p) if p.is_file() else None
 
 
-def _chat_picker_choices() -> list[tuple[str, str]]:
-    """Same list as the enrich scope picker, but without the 'All chats'
-    sentinel — save-chat renders one chat at a time, so an empty pick
-    is a hard error rather than a useful default.
-    """
-    return [opt for opt in _chat_scope_choices() if opt[0] != ""]
-
-
 def _chat_scope_choices() -> list[tuple[str, str]]:
     """Populate the chat-scope dropdown from the DB at form-build time.
 
@@ -213,8 +205,10 @@ TASKS: list[TaskSpec] = [
                 name="chat",
                 type="choice",
                 label="Chat",
-                help="Which chat to render. Type to filter.",
-                choices_provider=_chat_picker_choices,
+                help="Which chat to render. Pick 'All chats' to export every chat in one run. Type to filter.",
+                required=False,
+                default="",
+                choices_provider=_chat_scope_choices,
                 default_provider=_last_save_chat_chat,
             ),
             ParamSpec(

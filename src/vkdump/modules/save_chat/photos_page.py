@@ -168,14 +168,24 @@ def _fetch_photos(chat_id: int) -> list[tuple]:
     DESC sort still keeps contiguous-by-year runs together. Sender
     columns come along so per-sender pages can filter without a second
     query.
+
+    Sender display name is read from ``users.display_name`` (left-join
+    on ``users.vk_id`` against the message's ``sender_vk_id``) so the
+    deleted-labels backfill — ``"DELETED (Real Name)"`` — surfaces in
+    the gallery. Falls back to the per-message ``sender_display_name``
+    when there is no matching user row (anonymous / unresolved sender).
     """
     with connection() as conn:
         cur = conn.execute(
             "SELECT m.sent_at, a.local_path, a.resolution, a.description,"
-            "       a.file_size, m.sender_vk_id, m.sender_display_name,"
+            "       a.file_size, m.sender_vk_id,"
+            "       COALESCE(u.display_name, m.sender_display_name)"
+            "         AS sender_display_name,"
             "       m.vk_message_id, m.source_file"
             " FROM attachments a"
             " JOIN messages m ON m.id = a.message_id"
+            " LEFT JOIN users u ON u.vk_id = m.sender_vk_id"
+            "                  AND u.provider = m.provider"
             " WHERE m.chat_id = ?"
             "   AND a.kind = ?"
             "   AND a.download_status = 'ok'"

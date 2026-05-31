@@ -430,6 +430,41 @@ def _apply_profile(profile: ProfileInfo) -> int | None:
     return profile.vk_id
 
 
+def _fetch_avatar_bytes(url: str) -> tuple[bytes, str | None] | None:
+    """Download a user avatar synchronously. Returns
+    ``(bytes, content_type)`` on success, None on any failure. Tight
+    timeout so parse-dump never stalls on the avatar fetch — the rest
+    of the run is more important than this one row.
+
+    Builds an SSL context off the ``certifi`` CA bundle when
+    available. ``certifi`` ships with aiohttp (already a dep) so this
+    is a free win; without it ``urllib.request`` on macOS / many Python
+    builds defaults to an empty trust store and refuses every HTTPS
+    site (``x509_ca: 0``).
+    """
+    if not url:
+        return None
+    import ssl
+    import urllib.request
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context()
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "vkdump/0 (avatar fetcher)"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+            data = resp.read()
+            ctype = resp.headers.get("Content-Type")
+            return data, (ctype.split(";", 1)[0].strip() if ctype else None)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("avatar fetch failed for {}: {}", url, exc)
+        return None
+
+
 def _upsert_archive(
     owner_vk_id: int,
     owner_display_name: str | None,
@@ -446,6 +481,11 @@ def _upsert_archive(
     lets the same dump re-imported from a different path collapse onto
     one row. When no signature is parsed we fall back to
     ``UNIQUE(account_id, path)``.
+
+    Avatar bytes are fetched + stashed into ``accounts.avatar_binary``
+    on first sight, or whenever ``avatar_url`` changes — the column is
+    a BLOB, no on-disk file. Fetch failure leaves the BLOB NULL and
+    logs once; the row still gets created.
     """
     abs_path = initial_input.expanduser().resolve()
     kind = "zip" if abs_path.is_file() else "folder"
@@ -461,10 +501,27 @@ def _upsert_archive(
             (PROVIDER, owner_vk_id, owner_display_name, owner_avatar_url),
         )
         account_row = conn.execute(
-            "SELECT id FROM accounts WHERE provider=? AND vk_id=?",
+            "SELECT id, avatar_url, avatar_binary FROM accounts"
+            " WHERE provider=? AND vk_id=?",
             (PROVIDER, owner_vk_id),
         ).fetchone()
         account_id = int(account_row["id"])
+
+        # Fetch avatar bytes when: (a) the row doesn't have any yet, or
+        # (b) the URL just changed (we have new bytes to grab). Skip
+        # when neither condition holds — we already have the right
+        # blob.
+        stored_url = account_row["avatar_url"]
+        have_blob = account_row["avatar_binary"] is not None
+        if stored_url and (not have_blob or stored_url != owner_avatar_url):
+            fetched = _fetch_avatar_bytes(stored_url)
+            if fetched is not None:
+                data, ctype = fetched
+                conn.execute(
+                    "UPDATE accounts SET avatar_binary=?, avatar_content_type=?"
+                    " WHERE id=?",
+                    (data, ctype, account_id),
+                )
 
         path_str = str(abs_path)
         lang = footer.lang if footer else "unknown"

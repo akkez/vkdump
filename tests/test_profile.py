@@ -33,6 +33,20 @@ def test_parse_profile_full() -> None:
     assert info.avatar_url == "https://example.com/avatar.jpg"
 
 
+def test_parse_profile_english_label() -> None:
+    """English-locale dumps use 'Full name' instead of 'Полное имя'."""
+    html = _page(
+        name_block=(
+            '<div class="item">'
+            '<div class="item__tertiary">Full name</div>'
+            '<div>Ivan  Ivanov</div>'
+            '</div>'
+        ),
+    )
+    info = parse_profile_page(html)
+    assert info.display_name == "Ivan Ivanov"
+
+
 def test_parse_profile_minimal() -> None:
     """Missing name + avatar — owner id alone is enough."""
     info = parse_profile_page('<html><head><meta name="jd" content="eyJ1c2VyX2lkIjo0MiwidGltZV9jdXJyZW50IjoxN30="></head></html>')

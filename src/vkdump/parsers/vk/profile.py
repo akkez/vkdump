@@ -2,7 +2,7 @@
 
 Fields we extract:
 - vk_id (numeric) from the jd meta
-- display_name from the "Полное имя" row
+- display_name from the "Полное имя" / "Full name" row
 - avatar_url from the <img class="fans_fan_img"> tag
 
 Anything we can't find is left as None and the caller continues without it.
@@ -24,8 +24,9 @@ class ProfileInfo:
     avatar_url: str | None
 
 
+# Label localised by VK's exporter: Russian "Полное имя", English "Full name".
 _FULL_NAME_RE = re.compile(
-    r'<div class="item__tertiary">Полное имя</div>\s*<div>(?P<name>[^<]*)</div>',
+    r'<div class="item__tertiary">(?:Полное имя|Full name)</div>\s*<div>(?P<name>[^<]*)</div>',
     re.DOTALL,
 )
 _AVATAR_RE = re.compile(

@@ -148,23 +148,19 @@ def render(
     senders = _build_senders(photos)
     gallery_dir.mkdir(parents=True, exist_ok=True)
 
-    # One everyone-view file per sender-nav window. Page 0 keeps the
-    # canonical `index.html` filename; subsequent pages land at
-    # `everyone-2.html`, `everyone-3.html`, …
-    total_pages = _nav_page_count(len(senders))
-    for page_idx in range(total_pages):
-        main_html = _render_html(
-            chat_meta, photos, senders,
-            current=None, first_page=first_page,
-            nav_page_idx=page_idx,
-        )
-        (gallery_dir / _everyone_filename(page_idx)).write_text(
-            main_html, encoding="utf-8",
-        )
+    # Single everyone-view file. The sender-nav at the top shows
+    # window 0 plus a 'next' arrow pointing at the first sender of
+    # window 1 (when more windows exist); 'prev' is disabled here.
+    main_html = _render_html(
+        chat_meta, photos, senders,
+        current=None, first_page=first_page, nav_page_idx=0,
+    )
+    (gallery_dir / _MAIN_FILE).write_text(main_html, encoding="utf-8")
 
-    # Each per-sender page's nav window is the one containing that
-    # sender — so the user's own chip stays visible (highlighted) and
-    # prev/next arrows point at the surrounding everyone-K pages.
+    # One file per sender. Each picks the window containing its own
+    # chip; the pager arrows jump to the first sender of the adjacent
+    # window (or back to index.html for the leftmost case), never
+    # re-render the full everyone view.
     for sender in senders:
         filtered = [p for p in photos if p.sender_vk_id == sender.vk_id]
         page_html = _render_html(
@@ -211,15 +207,6 @@ def _fetch_photos(chat_id: int) -> list[tuple]:
             (chat_id, KIND_PHOTO),
         )
         return cur.fetchall()
-
-
-def _everyone_filename(nav_page_idx: int) -> str:
-    """File name for an everyone-view page at the given nav window
-    index. Page 0 keeps the canonical ``index.html`` name so the
-    top-level export index and ``_export.json::photos_page`` keep
-    pointing at the same URL across runs.
-    """
-    return _MAIN_FILE if nav_page_idx == 0 else f"everyone-{nav_page_idx + 1}.html"
 
 
 def _nav_page_count(n_senders: int) -> int:
@@ -363,27 +350,34 @@ def _render_sender_nav(
     total_photos: int,
     nav_page_idx: int,
 ) -> str:
-    """Two-line nav block:
+    """Single-row nav strip:
 
-    - Top row: a single 'everyone' link, always rendered (so the user
-      never loses the way back to the unfiltered view even when the
-      sender list is paginated).
-    - Bottom row: the sender chips for window ``nav_page_idx``
-      (slice ``[nav_page_idx * _NAV_PAGE_SIZE : ...]``) followed by
-      prev / next links to the adjacent ``everyone-K.html`` pages,
-      and a ``page K/N`` indicator. Rendered only when there's more
-      than one window — single-window chats stay one-line.
+    ``[everyone (N)] [<<< prev (X)] <30 chips> [next (Y) >>>]``
+
+    - ``everyone`` always links to ``index.html``. Active class when
+      ``current is None`` (i.e. rendering the everyone view itself).
+    - Prev arrow on a sender page in window K goes to ``index.html``
+      when K==0, else to the first sender of window K-1 (never
+      reloads the full everyone view in the middle of pagination).
+      Disabled when we're on the everyone view (K==0 there too) —
+      there is nothing to the left.
+    - Next arrow goes to the first sender of window K+1, or
+      disabled when we're already on the last window.
+    - X / Y in parentheses are sender counts on the windows to the
+      left / right of the current one (a preview of "how many more
+      names there are if I click").
+
+    The everyone view (``current is None``) lives in window 0 and
+    shows the same chips as the leftmost sender pages.
     """
     everyone_active = ' class="active"' if current is None else ""
     everyone_count = (
         total_photos if current is None
         else sum(s.count for s in senders)
     )
-    everyone_html = (
-        f'<div class="sender-nav-everyone">'
-        f'<a{everyone_active} href="{_MAIN_FILE}">everyone'
+    everyone_chip = (
+        f'<a{everyone_active} class="everyone-chip" href="{_MAIN_FILE}">everyone'
         f' <span class="count">({everyone_count})</span></a>'
-        f'</div>'
     )
 
     total_pages = _nav_page_count(len(senders))
@@ -400,37 +394,45 @@ def _render_sender_nav(
     chips_html = " ".join(chips)
 
     if total_pages <= 1:
-        # Single window — pager controls would be noise.
+        # Single window — no pager arrows; emit everyone + chips inline.
         return (
-            everyone_html
-            + f'<nav class="sender-nav">{chips_html}</nav>'
+            f'<nav class="sender-nav">{everyone_chip} {chips_html}</nav>'
         )
 
-    prev_idx = nav_page_idx - 1 if nav_page_idx > 0 else None
-    next_idx = nav_page_idx + 1 if nav_page_idx + 1 < total_pages else None
-    prev_html = (
-        f'<a class="pager-arrow" href="{_everyone_filename(prev_idx)}">← prev</a>'
-        if prev_idx is not None
-        else '<span class="pager-arrow disabled">← prev</span>'
-    )
-    next_html = (
-        f'<a class="pager-arrow" href="{_everyone_filename(next_idx)}">next →</a>'
-        if next_idx is not None
-        else '<span class="pager-arrow disabled">next →</span>'
-    )
-    pager_html = (
-        f'<div class="sender-pager">'
-        f'{prev_html}'
-        f' <span class="pager-label">'
-        f'senders {start + 1}–{start + len(window)} of {len(senders)}'
-        f' · page {nav_page_idx + 1}/{total_pages}</span> '
-        f'{next_html}'
-        f'</div>'
-    )
+    senders_left = start  # all senders before the current window
+    senders_right = len(senders) - (start + len(window))  # all senders past it
+
+    if nav_page_idx == 0:
+        prev_html = (
+            '<span class="pager-arrow disabled">'
+            f'&laquo;&laquo;&laquo; prev ({senders_left})</span>'
+        )
+    else:
+        prev_target = (
+            _MAIN_FILE if nav_page_idx == 1
+            else _sender_filename(senders[(nav_page_idx - 1) * _NAV_PAGE_SIZE])
+        )
+        prev_html = (
+            f'<a class="pager-arrow" href="{html_escape(prev_target, quote=True)}">'
+            f'&laquo;&laquo;&laquo; prev ({senders_left})</a>'
+        )
+
+    if nav_page_idx + 1 < total_pages:
+        next_target = _sender_filename(senders[(nav_page_idx + 1) * _NAV_PAGE_SIZE])
+        next_html = (
+            f'<a class="pager-arrow" href="{html_escape(next_target, quote=True)}">'
+            f'next ({senders_right}) &raquo;&raquo;&raquo;</a>'
+        )
+    else:
+        next_html = (
+            '<span class="pager-arrow disabled">'
+            f'next ({senders_right}) &raquo;&raquo;&raquo;</span>'
+        )
+
     return (
-        everyone_html
-        + f'<nav class="sender-nav">{chips_html}</nav>'
-        + pager_html
+        '<nav class="sender-nav">'
+        f'{everyone_chip} {prev_html} {chips_html} {next_html}'
+        '</nav>'
     )
 
 
@@ -553,20 +555,15 @@ body{font:14px/1.45 -apple-system,Segoe UI,sans-serif;margin:0;background:#fafaf
 .page-head .summary{margin:0 0 8px;color:#777;font-size:12px}
 .page-head .back{font-size:12px;color:#0a66c2;text-decoration:none;display:inline-block;margin-bottom:6px}
 .page-head .back:hover{text-decoration:underline}
-.sender-nav,.year-nav{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:13px}
-.sender-nav{margin-bottom:4px}
-.sender-nav-everyone{margin:2px 0 6px;font-size:13px;font-weight:600}
-.sender-nav-everyone a{color:#0a66c2;text-decoration:none}
-.sender-nav-everyone a.active{color:#222;text-decoration:none}
-.sender-nav-everyone a:hover{text-decoration:underline}
-.sender-nav-everyone .count{color:#999;font-size:11px;font-weight:400}
-.sender-pager{margin:2px 0 6px;font-size:12px;color:#777;display:flex;
-  gap:12px;align-items:center}
-.sender-pager .pager-arrow{color:#0a66c2;text-decoration:none}
-.sender-pager .pager-arrow:hover{text-decoration:underline}
-.sender-pager .pager-arrow.disabled{color:#bbb;cursor:default}
-.sender-pager .pager-label{color:#666}
-.year-nav{margin-top:4px;padding-top:6px;border-top:1px dashed #eee}
+.sender-nav,.year-nav{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:13px;
+  align-items:center}
+.sender-nav{margin-bottom:6px;padding-bottom:6px;border-bottom:1px dashed #eee}
+.sender-nav .everyone-chip{font-weight:600}
+.pager-arrow{color:#666;font-size:12px;text-decoration:none;
+  padding:0 4px;border-radius:3px}
+.pager-arrow:hover{background:#eef4fb;color:#0a66c2;text-decoration:none}
+.pager-arrow.disabled{color:#ccc;cursor:default}
+.pager-arrow.disabled:hover{background:transparent;color:#ccc}
 .sender-nav a,.year-nav a{color:#0a66c2;text-decoration:none}
 .sender-nav a:hover,.year-nav a:hover{text-decoration:underline}
 .sender-nav a.active,.year-nav a.active{color:#222;font-weight:600;text-decoration:none}

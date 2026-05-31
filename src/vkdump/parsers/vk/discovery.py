@@ -44,6 +44,7 @@ class Discovery:
     source: Source
     profile_file: str | None = None          # rel-path within the source
     messages_index_file: str | None = None   # rel-path within the source
+    index_file: str | None = None            # rel-path of root `index.html`
     chat_folders: list[str] = field(default_factory=list)
     single_html_files: list[str] = field(default_factory=list)
     initial_input: Path | None = None        # what the user actually passed in
@@ -89,6 +90,7 @@ def _discover_root(source: Source) -> Discovery:
 
     # Archive root: <root>/index.html + <root>/messages/ (+ optional profile).
     if source.is_file(_INDEX_HTML) and source.is_dir(_MESSAGES_DIR):
+        d.index_file = _INDEX_HTML
         d.messages_index_file = _pick_if_file(source, join(_MESSAGES_DIR, _INDEX_MESSAGES_HTML))
         d.profile_file = _pick_if_file(source, join(_PROFILE_DIR, _PAGE_INFO_HTML))
         d.chat_folders = _list_chat_folders(source, _MESSAGES_DIR)

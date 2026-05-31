@@ -32,6 +32,7 @@ from ..core.db import connection
 from ..core.i18n import plural as _plural
 from ..core.progress import ProgressReporter, Throttle
 from ..parsers.vk import (
+    ArchiveFooter,
     ChatIndexEntry,
     Discovery,
     ParsedChatMeta,
@@ -44,6 +45,7 @@ from ..parsers.vk import (
     discover,
     extract_account_id,
     list_message_pages,
+    parse_archive_footer,
     parse_chat_meta,
     parse_messages_index,
     parse_messages_index_file,
@@ -89,10 +91,14 @@ def _run_with_discovery(
 
     # ---------- optional: profile (dump owner) ----------
     owner_vk_id: int | None = None
+    owner_display_name: str | None = None
+    owner_avatar_url: str | None = None
     if discovery.profile_file is not None:
         try:
             profile = parse_profile_file(source, discovery.profile_file)
             owner_vk_id = _apply_profile(profile)
+            owner_display_name = profile.display_name
+            owner_avatar_url = profile.avatar_url
             progress.log(
                 f"profile: owner vk_id={profile.vk_id} name={profile.display_name!r} "
                 f"avatar={'yes' if profile.avatar_url else 'no'}"
@@ -100,6 +106,35 @@ def _run_with_discovery(
         except Exception:
             logger.exception("profile parsing failed for {}", discovery.profile_file)
             progress.log(f"profile: failed to parse {discovery.profile_file} (continuing)")
+
+    # ---------- optional: archive footer (signature + duration) ----------
+    archive_footer: ArchiveFooter | None = None
+    if discovery.index_file is not None:
+        try:
+            index_html = decode_dump_bytes(source.read_bytes(discovery.index_file))
+            archive_footer = parse_archive_footer(index_html)
+            if archive_footer is not None:
+                progress.log(
+                    f"archive footer: lang={archive_footer.lang} "
+                    f"generated_at={archive_footer.generated_at} "
+                    f"duration={archive_footer.duration_seconds}s"
+                )
+        except Exception:
+            logger.exception("archive footer parsing failed for {}", discovery.index_file)
+            progress.log(f"archive footer: failed to parse {discovery.index_file} (continuing)")
+
+    # Record the archive (and its owner) up front so the row exists even
+    # if the parse below is cancelled mid-way.
+    archive_id: int | None = None
+    if owner_vk_id is not None and discovery.initial_input is not None:
+        archive_id = _upsert_archive(
+            owner_vk_id=owner_vk_id,
+            owner_display_name=owner_display_name,
+            owner_avatar_url=owner_avatar_url,
+            initial_input=discovery.initial_input,
+            source_tz=source_tz,
+            footer=archive_footer,
+        )
 
     # ---------- optional: messages index (chat titles + peer ids) ----------
     indexed_entries: dict[str, ChatIndexEntry] = {}
@@ -117,7 +152,7 @@ def _run_with_discovery(
                     account_id = index_owner
                     progress.log(f"account_id resolved from messages-index: {account_id}")
             indexed_entries = {e.peer_folder: e for e in entries}
-            _preload_chats_from_index(entries, source_tz, account_id=account_id)
+            _preload_chats_from_index(entries, account_id=account_id)
             progress.log(f"messages-index: preloaded {_plural(len(entries), 'chat row')} with titles")
         except Exception:
             logger.exception("messages-index parsing failed for {}", discovery.messages_index_file)
@@ -235,7 +270,6 @@ def _run_with_discovery(
                         chat_name=chat_name,
                         pages=pages,
                         progress=chat_bar,
-                        source_tz=source_tz,
                         index_entry=index_entry,
                         account_id=account_id,
                         on_page_done=_on_page_done,
@@ -264,7 +298,6 @@ def _run_with_discovery(
                 page_rel=page_rel,
                 chat_rel=chat_rel,
                 chat_name=chat_name,
-                source_tz=source_tz,
                 index_entry=indexed_entries.get(chat_name),
                 account_id=account_id,
             )
@@ -354,6 +387,8 @@ def _aggregate_db_summary() -> dict:
 
 def _format_discovery(d: Discovery) -> str:
     parts = [f"discovery: source={d.source.describe()}"]
+    if d.index_file:
+        parts.append(f"index={d.index_file}")
     if d.profile_file:
         parts.append(f"profile={d.profile_file}")
     if d.messages_index_file:
@@ -382,8 +417,96 @@ def _apply_profile(profile: ProfileInfo) -> int | None:
     return profile.vk_id
 
 
+def _upsert_archive(
+    owner_vk_id: int,
+    owner_display_name: str | None,
+    owner_avatar_url: str | None,
+    initial_input: Path,
+    source_tz: str,
+    footer: ArchiveFooter | None,
+) -> int:
+    """Upsert one row each into `accounts` and `archives`, return the
+    archive's primary key.
+
+    Identity for archives is the footer signature
+    (``account_id + generated_at + duration``) when available — that
+    lets the same dump re-imported from a different path collapse onto
+    one row. When no signature is parsed we fall back to
+    ``UNIQUE(account_id, path)``.
+    """
+    abs_path = initial_input.expanduser().resolve()
+    kind = "zip" if abs_path.is_file() else "folder"
+    with connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO accounts (provider, vk_id, display_name, avatar_url)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (provider, vk_id) DO UPDATE SET
+                display_name = COALESCE(excluded.display_name, accounts.display_name),
+                avatar_url   = COALESCE(excluded.avatar_url,   accounts.avatar_url)
+            """,
+            (PROVIDER, owner_vk_id, owner_display_name, owner_avatar_url),
+        )
+        account_row = conn.execute(
+            "SELECT id FROM accounts WHERE provider=? AND vk_id=?",
+            (PROVIDER, owner_vk_id),
+        ).fetchone()
+        account_id = int(account_row["id"])
+
+        path_str = str(abs_path)
+        lang = footer.lang if footer else "unknown"
+        sig = footer.raw_text if footer else None
+        gen_at = footer.generated_at if footer else None
+        dur = footer.duration_seconds if footer else None
+
+        existing = None
+        if gen_at is not None and dur is not None:
+            existing = conn.execute(
+                """
+                SELECT id FROM archives
+                 WHERE account_id=? AND generated_at=? AND generation_duration_seconds=?
+                """,
+                (account_id, gen_at, dur),
+            ).fetchone()
+        if existing is None:
+            existing = conn.execute(
+                "SELECT id FROM archives WHERE account_id=? AND path=?",
+                (account_id, path_str),
+            ).fetchone()
+
+        if existing is not None:
+            arch_id = int(existing["id"])
+            conn.execute(
+                """
+                UPDATE archives
+                   SET kind=?, path=?, path_is_absolute=1, lang=?,
+                       signature_text=COALESCE(?, signature_text),
+                       generated_at=COALESCE(?, generated_at),
+                       generation_duration_seconds=COALESCE(?, generation_duration_seconds),
+                       source_timezone=?,
+                       last_seen_at=CURRENT_TIMESTAMP
+                 WHERE id=?
+                """,
+                (kind, path_str, lang, sig, gen_at, dur, source_tz, arch_id),
+            )
+            return arch_id
+
+        cur = conn.execute(
+            """
+            INSERT INTO archives (
+                account_id, kind, path, path_is_absolute, lang,
+                signature_text, generated_at, generation_duration_seconds,
+                source_timezone, last_seen_at
+            )
+            VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (account_id, kind, path_str, lang, sig, gen_at, dur, source_tz),
+        )
+        return int(cur.lastrowid)
+
+
 def _preload_chats_from_index(
-    entries: list[ChatIndexEntry], source_tz: str, account_id: str
+    entries: list[ChatIndexEntry], account_id: str
 ) -> None:
     """Insert chat rows we know about from the index, even before parsing any
     individual chat folder. Title + peer_id + type land immediately; counters
@@ -399,9 +522,9 @@ def _preload_chats_from_index(
                 """
                 INSERT INTO chats (
                     provider, account_id, source_folder, title,
-                    peer_id, source_timezone, type
+                    peer_id, type
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT (provider, account_id, source_folder) DO UPDATE SET
                     title = COALESCE(excluded.title, chats.title),
                     peer_id = COALESCE(excluded.peer_id, chats.peer_id),
@@ -413,7 +536,6 @@ def _preload_chats_from_index(
                     e.peer_folder,
                     e.title,
                     str(e.peer_id) if e.peer_id is not None else None,
-                    source_tz,
                     chat_type,
                 ),
             )
@@ -428,7 +550,6 @@ def _parse_one_chat(
     chat_name: str,
     pages: list[str],
     progress: ProgressReporter,
-    source_tz: str,
     index_entry: ChatIndexEntry | None,
     account_id: str,
     on_page_done: "Callable[[], None] | None" = None,
@@ -447,7 +568,7 @@ def _parse_one_chat(
     # this particular chat — same archive must reduce to one owner.
     effective_account_id = account_id or meta.account_id or ""
     chat_id = _upsert_chat(
-        meta, source_tz=source_tz, index_entry=index_entry,
+        meta, index_entry=index_entry,
         account_id=effective_account_id,
     )
 
@@ -536,7 +657,6 @@ def _parse_single_page(
     page_rel: str,
     chat_rel: str,
     chat_name: str,
-    source_tz: str,
     index_entry: ChatIndexEntry | None,
     account_id: str,
 ) -> dict:
@@ -549,7 +669,7 @@ def _parse_single_page(
     meta = parse_chat_meta(first_html, source_folder=chat_name)
     effective_account_id = account_id or meta.account_id or ""
     chat_id = _upsert_chat(
-        meta, source_tz=source_tz, index_entry=index_entry,
+        meta, index_entry=index_entry,
         account_id=effective_account_id,
     )
     with connection() as conn:
@@ -653,7 +773,6 @@ def _peer_id_from_folder(name: str) -> int | None:
 
 def _upsert_chat(
     meta: ParsedChatMeta,
-    source_tz: str,
     index_entry: ChatIndexEntry | None,
     account_id: str,
 ) -> int:
@@ -678,15 +797,12 @@ def _upsert_chat(
             """
             INSERT INTO chats (
                 provider, account_id, source_folder, title,
-                total_expected_count, source_timezone, dump_generated_at,
-                peer_id, type
+                total_expected_count, peer_id, type
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (provider, account_id, source_folder) DO UPDATE SET
                 title = COALESCE(excluded.title, chats.title),
                 total_expected_count = COALESCE(excluded.total_expected_count, chats.total_expected_count),
-                source_timezone = excluded.source_timezone,
-                dump_generated_at = COALESCE(excluded.dump_generated_at, chats.dump_generated_at),
                 peer_id = COALESCE(excluded.peer_id, chats.peer_id),
                 type = COALESCE(excluded.type, chats.type)
             RETURNING id
@@ -697,8 +813,6 @@ def _upsert_chat(
                 meta.source_folder,
                 title,
                 meta.total_expected_count,
-                source_tz,
-                meta.dump_generated_at,
                 peer_id,
                 chat_type,
             ),

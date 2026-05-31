@@ -1,5 +1,6 @@
 """Public API of the VK HTML parser. Stateless helpers; no DB orchestration."""
 from .discovery import Discovery, discover
+from .footer import ArchiveFooter, parse_archive_footer
 from .index import (
     CHAT_TYPE_COMMUNITY,
     CHAT_TYPE_DM,
@@ -43,6 +44,7 @@ __all__ = [
     "CHAT_TYPE_COMMUNITY",
     "CHAT_TYPE_DM",
     "CHAT_TYPE_GROUP_CHAT",
+    "ArchiveFooter",
     "DirectorySource",
     "Discovery",
     "KIND_AUDIO",
@@ -70,6 +72,7 @@ __all__ = [
     "list_message_pages",
     "looks_like_chat_folder",
     "open_source",
+    "parse_archive_footer",
     "parse_chat_meta",
     "parse_messages_index",
     "parse_messages_index_file",

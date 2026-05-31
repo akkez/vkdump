@@ -39,6 +39,11 @@ _MAIN_FILE = "index.html"
 # filesystem via `file://` — folder URLs there show a directory
 # listing instead of auto-loading `index.html`.
 _GALLERY_LINK = f"{_GALLERY_DIR}/{_MAIN_FILE}"
+# Sender chips per page in the top-of-page nav. 30 fits comfortably on
+# a single row for typical screens; chats with hundreds of senders no
+# longer balloon the header into a multi-page-tall block. Pages
+# beyond the first land at `everyone-2.html`, `everyone-3.html`, …
+_NAV_PAGE_SIZE = 30
 # Length cap on the sender-name portion of the per-sender filename.
 # The trailing `-<vk_id>` segment is always appended so collisions on
 # the same display name (and on truncations) are still disambiguated.
@@ -143,17 +148,29 @@ def render(
     senders = _build_senders(photos)
     gallery_dir.mkdir(parents=True, exist_ok=True)
 
-    main_html = _render_html(
-        chat_meta, photos, senders,
-        current=None, first_page=first_page,
-    )
-    (gallery_dir / _MAIN_FILE).write_text(main_html, encoding="utf-8")
+    # One everyone-view file per sender-nav window. Page 0 keeps the
+    # canonical `index.html` filename; subsequent pages land at
+    # `everyone-2.html`, `everyone-3.html`, …
+    total_pages = _nav_page_count(len(senders))
+    for page_idx in range(total_pages):
+        main_html = _render_html(
+            chat_meta, photos, senders,
+            current=None, first_page=first_page,
+            nav_page_idx=page_idx,
+        )
+        (gallery_dir / _everyone_filename(page_idx)).write_text(
+            main_html, encoding="utf-8",
+        )
 
+    # Each per-sender page's nav window is the one containing that
+    # sender — so the user's own chip stays visible (highlighted) and
+    # prev/next arrows point at the surrounding everyone-K pages.
     for sender in senders:
         filtered = [p for p in photos if p.sender_vk_id == sender.vk_id]
         page_html = _render_html(
             chat_meta, filtered, senders,
             current=sender, first_page=first_page,
+            nav_page_idx=_nav_page_for_sender(senders, sender),
         )
         (gallery_dir / _sender_filename(sender)).write_text(page_html, encoding="utf-8")
 
@@ -194,6 +211,32 @@ def _fetch_photos(chat_id: int) -> list[tuple]:
             (chat_id, KIND_PHOTO),
         )
         return cur.fetchall()
+
+
+def _everyone_filename(nav_page_idx: int) -> str:
+    """File name for an everyone-view page at the given nav window
+    index. Page 0 keeps the canonical ``index.html`` name so the
+    top-level export index and ``_export.json::photos_page`` keep
+    pointing at the same URL across runs.
+    """
+    return _MAIN_FILE if nav_page_idx == 0 else f"everyone-{nav_page_idx + 1}.html"
+
+
+def _nav_page_count(n_senders: int) -> int:
+    """Number of sender-nav pages needed to cover ``n_senders``."""
+    if n_senders <= 0:
+        return 1
+    return (n_senders + _NAV_PAGE_SIZE - 1) // _NAV_PAGE_SIZE
+
+
+def _nav_page_for_sender(senders: list["_Sender"], sender: "_Sender") -> int:
+    """Window index containing ``sender`` in the ordered ``senders``
+    list. Falls back to 0 if not found (shouldn't happen in practice;
+    defensive)."""
+    for idx, s in enumerate(senders):
+        if s.vk_id == sender.vk_id:
+            return idx // _NAV_PAGE_SIZE
+    return 0
 
 
 def _sender_slug(display_name: str | None, vk_id: int) -> str:
@@ -314,6 +357,83 @@ def _fmt_tooltip(p: _Photo, *, include_author: bool) -> str:
     return " · ".join(parts)
 
 
+def _render_sender_nav(
+    senders: list[_Sender],
+    current: _Sender | None,
+    total_photos: int,
+    nav_page_idx: int,
+) -> str:
+    """Two-line nav block:
+
+    - Top row: a single 'everyone' link, always rendered (so the user
+      never loses the way back to the unfiltered view even when the
+      sender list is paginated).
+    - Bottom row: the sender chips for window ``nav_page_idx``
+      (slice ``[nav_page_idx * _NAV_PAGE_SIZE : ...]``) followed by
+      prev / next links to the adjacent ``everyone-K.html`` pages,
+      and a ``page K/N`` indicator. Rendered only when there's more
+      than one window — single-window chats stay one-line.
+    """
+    everyone_active = ' class="active"' if current is None else ""
+    everyone_count = (
+        total_photos if current is None
+        else sum(s.count for s in senders)
+    )
+    everyone_html = (
+        f'<div class="sender-nav-everyone">'
+        f'<a{everyone_active} href="{_MAIN_FILE}">everyone'
+        f' <span class="count">({everyone_count})</span></a>'
+        f'</div>'
+    )
+
+    total_pages = _nav_page_count(len(senders))
+    start = nav_page_idx * _NAV_PAGE_SIZE
+    window = senders[start:start + _NAV_PAGE_SIZE]
+    chips: list[str] = []
+    for s in window:
+        active = ' class="active"' if current and current.vk_id == s.vk_id else ""
+        chips.append(
+            f'<a{active} href="{html_escape(_sender_filename(s), quote=True)}">'
+            f'{html_escape(s.display_name)}'
+            f' <span class="count">({s.count})</span></a>'
+        )
+    chips_html = " ".join(chips)
+
+    if total_pages <= 1:
+        # Single window — pager controls would be noise.
+        return (
+            everyone_html
+            + f'<nav class="sender-nav">{chips_html}</nav>'
+        )
+
+    prev_idx = nav_page_idx - 1 if nav_page_idx > 0 else None
+    next_idx = nav_page_idx + 1 if nav_page_idx + 1 < total_pages else None
+    prev_html = (
+        f'<a class="pager-arrow" href="{_everyone_filename(prev_idx)}">← prev</a>'
+        if prev_idx is not None
+        else '<span class="pager-arrow disabled">← prev</span>'
+    )
+    next_html = (
+        f'<a class="pager-arrow" href="{_everyone_filename(next_idx)}">next →</a>'
+        if next_idx is not None
+        else '<span class="pager-arrow disabled">next →</span>'
+    )
+    pager_html = (
+        f'<div class="sender-pager">'
+        f'{prev_html}'
+        f' <span class="pager-label">'
+        f'senders {start + 1}–{start + len(window)} of {len(senders)}'
+        f' · page {nav_page_idx + 1}/{total_pages}</span> '
+        f'{next_html}'
+        f'</div>'
+    )
+    return (
+        everyone_html
+        + f'<nav class="sender-nav">{chips_html}</nav>'
+        + pager_html
+    )
+
+
 def _render_html(
     chat_meta: dict,
     photos: list[_Photo],
@@ -321,6 +441,7 @@ def _render_html(
     *,
     current: _Sender | None = None,
     first_page: str | None = None,
+    nav_page_idx: int = 0,
 ) -> str:
     chat_title = chat_meta.get("title") or str(chat_meta.get("peer_id") or "")
     page_subject = (
@@ -342,22 +463,11 @@ def _render_html(
         f' <span class="count">({len(items)})</span></a>'
         for y, items in sections
     )
-    sender_links_parts: list[str] = []
-    # "Everyone" anchor: always points back to the gallery's main page,
-    # marked active when the current view is the unfiltered one.
-    all_active = ' class="active"' if current is None else ""
-    sender_links_parts.append(
-        f'<a{all_active} href="{_MAIN_FILE}">everyone'
-        f' <span class="count">({len(photos) if current is None else sum(s.count for s in senders)})</span></a>'
+    sender_nav_html = _render_sender_nav(
+        senders, current,
+        total_photos=len(photos) if current is None else sum(s.count for s in senders),
+        nav_page_idx=nav_page_idx,
     )
-    for s in senders:
-        active = ' class="active"' if current and current.vk_id == s.vk_id else ""
-        sender_links_parts.append(
-            f'<a{active} href="{html_escape(_sender_filename(s), quote=True)}">'
-            f'{html_escape(s.display_name)}'
-            f' <span class="count">({s.count})</span></a>'
-        )
-    sender_links = " ".join(sender_links_parts)
     # `current is None` ⇒ main gallery page mixes senders, so the
     # tooltip needs the author. Per-sender pages omit it (every photo
     # on that page is by that one person).
@@ -427,7 +537,7 @@ def _render_html(
         f'<h1>{heading}</h1>'
         f'<p class="summary">{html_escape(plural(total, "photo"))}'
         f' · {html_escape(span_label)}</p>'
-        f'<nav class="sender-nav">{sender_links}</nav>'
+        f'{sender_nav_html}'
         f'<nav class="year-nav">{year_links}</nav>'
         '</header>'
         f'<main>{"".join(body_parts)}</main>'
@@ -444,7 +554,19 @@ body{font:14px/1.45 -apple-system,Segoe UI,sans-serif;margin:0;background:#fafaf
 .page-head .back{font-size:12px;color:#0a66c2;text-decoration:none;display:inline-block;margin-bottom:6px}
 .page-head .back:hover{text-decoration:underline}
 .sender-nav,.year-nav{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:13px}
-.sender-nav{margin-bottom:6px;padding-bottom:6px;border-bottom:1px dashed #eee}
+.sender-nav{margin-bottom:4px}
+.sender-nav-everyone{margin:2px 0 6px;font-size:13px;font-weight:600}
+.sender-nav-everyone a{color:#0a66c2;text-decoration:none}
+.sender-nav-everyone a.active{color:#222;text-decoration:none}
+.sender-nav-everyone a:hover{text-decoration:underline}
+.sender-nav-everyone .count{color:#999;font-size:11px;font-weight:400}
+.sender-pager{margin:2px 0 6px;font-size:12px;color:#777;display:flex;
+  gap:12px;align-items:center}
+.sender-pager .pager-arrow{color:#0a66c2;text-decoration:none}
+.sender-pager .pager-arrow:hover{text-decoration:underline}
+.sender-pager .pager-arrow.disabled{color:#bbb;cursor:default}
+.sender-pager .pager-label{color:#666}
+.year-nav{margin-top:4px;padding-top:6px;border-top:1px dashed #eee}
 .sender-nav a,.year-nav a{color:#0a66c2;text-decoration:none}
 .sender-nav a:hover,.year-nav a:hover{text-decoration:underline}
 .sender-nav a.active,.year-nav a.active{color:#222;font-weight:600;text-decoration:none}

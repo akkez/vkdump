@@ -33,6 +33,7 @@ KIND_MOMENT = "moment"
 KIND_PHOTO_ALBUM = "photo_album"
 KIND_MARKET_ALBUM = "market_album"
 KIND_CHANNEL_MESSAGE = "channel_message"
+KIND_CHAT_EVENT = "chat_event"
 KIND_UNKNOWN = "unknown"
 
 
@@ -43,6 +44,7 @@ class ParsedAttachment:
     url: str | None = None
     forward_count: int | None = None  # only set when kind == KIND_FORWARD
     position: int = 0
+    data: dict | None = None  # structured payload (e.g. chat_event); persisted as JSON in data_json
 
 
 @dataclass

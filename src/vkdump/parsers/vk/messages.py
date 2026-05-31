@@ -24,6 +24,7 @@ from typing import Iterator
 
 from .sources import Source
 
+from .chat_events import parse_chat_event
 from .dates import DateParseError, parse_vk_datetime
 from .models import (
     KIND_APP_ACTION,
@@ -344,12 +345,19 @@ def _parse_one_message(
 
     text, kludges_html = _split_body(body)
     attachments = _parse_attachments(kludges_html)
+    residue = _kludges_residue_after_attachments(kludges_html)
+    if residue.strip():
+        event = parse_chat_event(residue, text)
+        if event is not None:
+            event.position = len(attachments)
+            attachments.append(event)
+            residue = ""
     forwarded_count = sum(
         (a.forward_count or 0) for a in attachments if a.kind == KIND_FORWARD
     )
     fully_parsed = (
         all(a.kind != KIND_UNKNOWN for a in attachments)
-        and _kludges_residue_is_empty(kludges_html)
+        and not re.search(r"<[A-Za-z]", residue)
     )
 
     return ParsedMessage(
@@ -382,18 +390,13 @@ def _parse_edited(header: str) -> tuple[bool, "datetime | None"]:
         return True, None
 
 
-def _kludges_residue_is_empty(kludges_html: str) -> bool:
-    """Return True iff everything inside the kludges block is captured by
-    `<div class="attachment">...</div>` blocks — i.e. nothing meaningful is
-    left over after stripping the attachments.
-
-    Used to decide whether the message is "fully parsed". If kludges holds
-    a service-message rendering (e.g. `<a class="im_srv_lnk">X</a> создал
-    чат «<b>Y</b>»`) or anything else outside an attachment block, we leave
-    the message marked as not fully parsed so callers can keep raw_html.
+def _kludges_residue_after_attachments(kludges_html: str) -> str:
+    """Return the kludges fragment with all `<div class="attachment">…</div>`
+    blocks stripped — i.e. whatever is left over for the chat-event parser
+    (or unparsed markup).
     """
     if not kludges_html:
-        return True
+        return ""
     cursor = 0
     pieces: list[str] = []
     for m in _ATT_OPEN_RE.finditer(kludges_html):
@@ -401,12 +404,13 @@ def _kludges_residue_is_empty(kludges_html: str) -> bool:
         try:
             close_at = _find_balanced_div_end(kludges_html, m.end())
         except ValueError:
-            return False
+            # Unbalanced attachment block — return what we have so the caller
+            # decides whether to treat the rest as unparsed.
+            pieces.append(kludges_html[m.start():])
+            return "".join(pieces)
         cursor = close_at + len("</div>")
     pieces.append(kludges_html[cursor:])
-    residue = "".join(pieces)
-    # Anything that opens an HTML element ⇒ unparsed content present.
-    return re.search(r"<[A-Za-z]", residue) is None
+    return "".join(pieces)
 
 
 def _parse_header(header: str) -> tuple[int | None, str | None, bool, str]:

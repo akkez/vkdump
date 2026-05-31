@@ -19,6 +19,7 @@ item never blocks the rest.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 import unicodedata
@@ -864,8 +865,8 @@ def _insert_messages_conn(
                     conn.execute(
                         """
                         INSERT INTO attachments
-                            (message_id, kind, description, url, forward_count, position)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                            (message_id, kind, description, url, forward_count, position, data_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             message_pk,
@@ -874,6 +875,7 @@ def _insert_messages_conn(
                             a.url,
                             a.forward_count,
                             a.position,
+                            json.dumps(a.data, ensure_ascii=False) if a.data else None,
                         ),
                     )
     return inserted

@@ -360,10 +360,10 @@ def test_html_entities_decoded() -> None:
     assert m.text == "<hello> & goodbye"
 
 
-def test_service_message_kludges_marks_not_fully_parsed() -> None:
-    """`im_srv_lnk` inside kludges = service message; we don't model
-    those yet, so the message is kept with `fully_parsed=False` and
-    its raw_html is preserved by the orchestrator.
+def test_service_message_captured_as_chat_event() -> None:
+    """`im_srv_lnk` inside kludges = service message; the chat_event parser
+    captures it into a synthetic attachment and the message is then
+    fully_parsed (no raw_html retained).
     """
     html = _wrap(
         '<div class="message__header"><a href="https://vk.com/public10">'
@@ -371,6 +371,30 @@ def test_service_message_kludges_marks_not_fully_parsed() -> None:
         '<div><div class="kludges">'
         '<a class="im_srv_lnk" href="https://vk.com/public10">Group</a>'
         ' created chat «<b class="im_srv_lnk">Hello</b>»'
+        '</div></div>'
+    )
+    m = _parse_one(html)
+    assert m.fully_parsed is True
+    assert len(m.attachments) == 1
+    event = m.attachments[0]
+    assert event.kind == "chat_event"
+    assert event.data is not None
+    assert event.data["subtype"] == "chat_create"
+    assert event.data["title_after"] == "Hello"
+    assert event.data["actor"]["vk_id"] == -10
+    assert event.data["lang"] == "en"
+
+
+def test_service_message_unrecognised_stays_unparsed() -> None:
+    """When the residue doesn't match any known subtype, fully_parsed stays
+    False so raw_html is retained for later re-parse.
+    """
+    html = _wrap(
+        '<div class="message__header"><a href="https://vk.com/id7">'
+        'User</a>, 1 янв 2024 в 0:00:00</div>'
+        '<div><div class="kludges">'
+        '<a class="im_srv_lnk" href="https://vk.com/id7">User</a>'
+        ' did something we have not modelled yet'
         '</div></div>'
     )
     m = _parse_one(html)

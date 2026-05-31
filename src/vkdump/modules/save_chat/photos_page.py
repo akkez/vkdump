@@ -63,7 +63,8 @@ _UNKNOWN_ASPECT = 1.0
 
 @dataclass(frozen=True)
 class _Photo:
-    href: str           # POSIX path relative to photos.html
+    href: str               # POSIX path to the local asset (img src)
+    message_anchor: str     # POSIX path to messages/<page>#m<vk_message_id>
     sent_at: datetime
     width: int | None
     height: int | None
@@ -103,7 +104,10 @@ def render(
         return None, 0
     gallery_dir = ctx.output_chat_dir / _GALLERY_DIR
     photos: list[_Photo] = []
-    for sent_at, local_path, resolution, description, file_size, sender_vk_id, sender_display_name in rows:
+    for (
+        sent_at, local_path, resolution, description, file_size,
+        sender_vk_id, sender_display_name, vk_message_id, source_file,
+    ) in rows:
         src = ctx.static_root / local_path
         if not src.is_file():
             continue
@@ -113,9 +117,18 @@ def render(
         # HTML file lives there; assets are one level up, so the result
         # is `../assets/<year>/photos/...`.
         href = os.path.relpath(dst, gallery_dir).replace(os.sep, "/")
+        # Source page basename + #m<vk_message_id> — offline-first
+        # relative link; clicking the photo jumps into the rendered
+        # message context instead of opening the bare asset.
+        message_anchor = (
+            f"../messages/{source_file}#m{vk_message_id}"
+            if source_file and vk_message_id is not None
+            else href
+        )
         w, h = _parse_resolution(resolution)
         photos.append(_Photo(
             href=href,
+            message_anchor=message_anchor,
             sent_at=sent_at,
             width=w,
             height=h,
@@ -159,7 +172,8 @@ def _fetch_photos(chat_id: int) -> list[tuple]:
     with connection() as conn:
         cur = conn.execute(
             "SELECT m.sent_at, a.local_path, a.resolution, a.description,"
-            "       a.file_size, m.sender_vk_id, m.sender_display_name"
+            "       a.file_size, m.sender_vk_id, m.sender_display_name,"
+            "       m.vk_message_id, m.source_file"
             " FROM attachments a"
             " JOIN messages m ON m.id = a.message_id"
             " WHERE m.chat_id = ?"
@@ -351,6 +365,7 @@ def _render_html(
             body_parts.append('<div class="col">')
             for p in col:
                 href = html_escape(p.href, quote=True)
+                anchor = html_escape(p.message_anchor, quote=True)
                 tooltip = html_escape(
                     _fmt_tooltip(p, include_author=include_author), quote=True
                 )
@@ -363,12 +378,11 @@ def _render_html(
                     f' width="{p.width}" height="{p.height}"'
                     if p.width and p.height else ""
                 )
-                # Both <a> and <img> carry title= so any browser shows
-                # the tooltip whether the cursor lands on the image or
-                # its hit-area wrapper.
+                # `<a>` jumps to the message anchor; `<img src>` stays
+                # on the local asset so the thumbnail renders.
                 body_parts.append(
                     '<figure>'
-                    f'<a href="{href}" title="{tooltip}">'
+                    f'<a href="{anchor}" title="{tooltip}">'
                     f'<img loading="lazy" decoding="async"'
                     f' src="{href}" alt="" title="{tooltip}"{size_attrs}>'
                     '</a>'

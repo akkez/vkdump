@@ -8,9 +8,23 @@ import re
 import shutil
 from html import escape as html_escape
 from pathlib import Path
+from urllib.parse import urlparse
 
 from ...parsers.vk.models import KIND_PHOTO, ParsedAttachment, ParsedMessage
 from .pipeline import AttMeta, Transform, TransformContext
+
+
+_MESSAGE_OPEN_RE = re.compile(
+    r'<div\s+class="message"\s+data-id="(?P<id>\d+)">'
+)
+
+# Matches an `attachment__description` div ending right before the
+# search-region boundary — used to detect a description that sits
+# immediately above a given `attachment__link` so the inliner can
+# swallow it (the inlined `<img>` is the label now).
+_DESC_ABOVE_LINK_RE = re.compile(
+    r'<div class="attachment__description">[^<]*</div>\s*\Z'
+)
 
 
 def _fmt_size(n: int | None) -> str | None:
@@ -52,6 +66,19 @@ def _link_re(url: str) -> re.Pattern[str]:
         r'<a\s+class=[\'"]attachment__link[\'"]\s+href=[\'"]'
         + re.escape(url)
         + r'[\'"]'
+    )
+
+
+def _full_link_re(url: str) -> re.Pattern[str]:
+    """Match the full `<a class="attachment__link" href="URL">TEXT</a>`
+    block for a known URL. Used by the photo inliner to absorb the
+    original anchor when it can be replaced with a compact hostname
+    link inside the caption strip.
+    """
+    return re.compile(
+        r'<a\s+class=[\'"]attachment__link[\'"]\s+href=[\'"]'
+        + re.escape(url)
+        + r'[\'"]\s*>(?P<text>[^<]*)</a>'
     )
 
 
@@ -156,24 +183,57 @@ class InlinePhotosTransform:
         return os.path.relpath(dst, ctx.pages_dir).replace(os.sep, "/")
 
     @staticmethod
+    def _desc_extent_before_link(html: str, link_start: int) -> int:
+        """Position where the `attachment__description` sitting immediately
+        above this link starts. Returns ``link_start`` unchanged when no
+        adjacent description is found. Bounded backwards scan (≤256 chars)
+        keeps this cheap on long pages."""
+        window_start = max(0, link_start - 256)
+        m = _DESC_ABOVE_LINK_RE.search(html[window_start:link_start])
+        if m is None:
+            return link_start
+        return window_start + m.start()
+
+    @staticmethod
     def _inject(html: str, att: ParsedAttachment, asset_href: str, meta: AttMeta) -> str:
         pat = _link_re(att.url or "")
         m = pat.search(html)
         if m is None:
             return html
+        splice_start = InlinePhotosTransform._desc_extent_before_link(
+            html, m.start()
+        )
+        # Try to absorb the entire original `<a>…</a>` so its visible
+        # URL — which is just a long verbatim copy of `href` — gets
+        # compressed into a hostname chip inside the caption strip.
+        # If the regex fails (unexpected text shape), leave the original
+        # anchor in place and skip the chip: keeps the page consistent
+        # at "either both transformations or neither".
+        full_re = _full_link_re(att.url or "")
+        m_full = full_re.match(html, m.start())
+
         label = _build_alt(att.description, meta)
         alt = html_escape(label, quote=True)
-        # Caption + title: title still set for browsers that surface it
-        # (some don't show it reliably — Firefox, as the user noticed),
-        # plus an always-visible caption strip under the image so the
-        # metadata is just *there* without a hover dance.
         caption = html_escape(label, quote=False)
         href = html_escape(asset_href, quote=True)
         # Block-level wrapper with inline styles so we don't depend on
-        # VK's own CSS: description/link in VK markup is inline, so
-        # without `display:block` the injected image flows mid-sentence
-        # next to "Фотография" and the URL. Margins separate it from
-        # the surrounding text; max-width keeps wide images contained.
+        # VK's own CSS: VK's description/link siblings are inline, so
+        # without `display:block` the injected image flows mid-sentence.
+        # Margins separate it from surrounding text; max-width contains
+        # wide images within the column.
+        caption_inner = caption
+        end = m.start()
+        if m_full is not None:
+            host = urlparse(att.url or "").netloc or (att.url or "")
+            url_attr = html_escape(att.url or "", quote=True)
+            host_text = html_escape(host, quote=False)
+            caption_inner = (
+                f'{caption} · '
+                f'<a href="{url_attr}"'
+                ' style="color:#888;text-decoration:underline">'
+                f'{host_text}</a>'
+            )
+            end = m_full.end()
         tag = (
             '<div class="vkdump-inline-photo"'
             ' style="display:block;margin:6px 0">'
@@ -183,10 +243,35 @@ class InlinePhotosTransform:
             '</a>'
             f'<div class="vkdump-caption"'
             ' style="font-size:11px;color:#888;margin-top:2px">'
-            f'{caption}</div>'
+            f'{caption_inner}</div>'
             '</div>'
         )
-        return html[:m.start()] + tag + html[m.start():]
+        return html[:splice_start] + tag + html[end:]
 
 
-DEFAULT_TRANSFORMS: list[Transform] = [InlinePhotosTransform()]
+class MessageAnchorTransform:
+    """Add ``id="m<vk_message_id>"`` to each ``<div class="message">``
+    block so deep links of the form ``messagesN.html#m361522`` jump
+    straight to that message. ``data-id`` stays untouched — browsers
+    target the HTML ``id`` attribute, not ``data-id``.
+    """
+
+    name = "message_anchor"
+
+    def apply(self, msg: ParsedMessage, ctx: TransformContext) -> ParsedMessage:
+        anchor = f' id="m{msg.vk_message_id}"'
+        new_html, n = _MESSAGE_OPEN_RE.subn(
+            lambda m: m.group(0)[:-1] + anchor + ">",
+            msg.raw_html, count=1,
+        )
+        if n:
+            msg.raw_html = new_html
+        return msg
+
+
+# Order matters: anchor first so InlinePhotos sees the augmented opening
+# tag (it doesn't depend on it, but keeps the chain easier to reason about).
+DEFAULT_TRANSFORMS: list[Transform] = [
+    MessageAnchorTransform(),
+    InlinePhotosTransform(),
+]

@@ -17,6 +17,7 @@ from vkdump.modules.save_chat.run import _transform_page
 from vkdump.modules.save_chat.transforms import (
     InlinePhotosTransform,
     MessageAnchorTransform,
+    SenderNameFromDBTransform,
 )
 from vkdump.modules.save_chat.pipeline import apply_pipeline
 from vkdump.parsers.vk.models import ParsedMessage
@@ -383,6 +384,79 @@ def test_description_kept_for_non_photo_attachments(ctx: TransformContext) -> No
     html = _page([_msg_block(42, "Вы, 1 янв 2024 в 12:00:00", body)])
     new_html, _, _ = _transform_page(html, "t.html", ctx)
     assert ">Файл<" in new_html
+
+
+# ---------- sender-name-from-DB transform ----------
+
+
+def _msg_block_with_sender(
+    msg_id: int, vk_id: int, sender_name: str, body_inner: str = "",
+) -> str:
+    """A VK-style message block whose header carries an `<a>` link to
+    the sender (id<num> or club<num>). Used to exercise the sender-name
+    transform — the existing `_msg_block` helper only emits the
+    self-message form."""
+    prefix = "id" if vk_id > 0 else "club"
+    n = abs(vk_id)
+    header = (
+        f'<a href="https://vk.com/{prefix}{n}">{sender_name}</a>'
+        ', 1 янв 2024 в 12:00:00'
+    )
+    return (
+        f'<div class="item"><div class=\'item__main\'>'
+        f'<div class="message" data-id="{msg_id}">'
+        f'<div class="message__header">{header}</div>'
+        f'<div>caption<div class="kludges">{body_inner}</div></div>'
+        f'</div></div></div>'
+    )
+
+
+def test_sender_transform_replaces_name(ctx: TransformContext) -> None:
+    ctx.user_names = {123: "DELETED (Aa Bb)"}
+    html = _page([_msg_block_with_sender(1, 123, "DELETED")])
+    new_html, _, _ = _transform_page(html, "t.html", ctx)
+    assert ">DELETED (Aa Bb)</a>" in new_html
+    assert ">DELETED</a>" not in new_html
+    # The href itself is preserved verbatim.
+    assert 'href="https://vk.com/id123"' in new_html
+
+
+def test_sender_transform_handles_community_negative_id(ctx: TransformContext) -> None:
+    """club/public/event hrefs map to a negative peer id in DB. The
+    transform must flip sign when looking the name up."""
+    ctx.user_names = {-456: "Renamed Community"}
+    html = _page([_msg_block_with_sender(2, -456, "Old Name")])
+    new_html, _, _ = _transform_page(html, "t.html", ctx)
+    assert ">Renamed Community</a>" in new_html
+    assert 'href="https://vk.com/club456"' in new_html
+
+
+def test_sender_transform_noop_when_db_lacks_user(ctx: TransformContext) -> None:
+    """Unknown vk_id → header stays untouched."""
+    ctx.user_names = {}
+    html = _page([_msg_block_with_sender(3, 789, "Stranger")])
+    new_html, _, _ = _transform_page(html, "t.html", ctx)
+    assert ">Stranger</a>" in new_html
+
+
+def test_sender_transform_noop_when_name_already_matches(
+    ctx: TransformContext,
+) -> None:
+    """No subn fire when the existing text already equals the DB value
+    (idempotent re-renders)."""
+    ctx.user_names = {321: "Already Right"}
+    html = _page([_msg_block_with_sender(4, 321, "Already Right")])
+    new_html, _, _ = _transform_page(html, "t.html", ctx)
+    assert new_html.count(">Already Right</a>") == 1
+
+
+def test_sender_transform_escapes_html_in_name(ctx: TransformContext) -> None:
+    """Names with `<` / `&` characters must be HTML-escaped before
+    going back into the markup, else they'd break the document."""
+    ctx.user_names = {654: "A & <evil>"}
+    html = _page([_msg_block_with_sender(5, 654, "Foo")])
+    new_html, _, _ = _transform_page(html, "t.html", ctx)
+    assert ">A &amp; &lt;evil&gt;</a>" in new_html
 
 
 # ---------- anchor transform ----------

@@ -347,6 +347,22 @@ def _build_url_meta(chat_id: int) -> dict[str, AttMeta]:
     return out
 
 
+def _build_user_names() -> dict[int, str]:
+    """vk_id → display_name for every known user. One pass over the
+    `users` table — cheap even for tens of thousands of rows, and lets
+    the sender-name transform avoid per-message lookups.
+    """
+    out: dict[int, str] = {}
+    with connection() as conn:
+        for row in conn.execute(
+            "SELECT vk_id, display_name FROM users"
+            " WHERE provider='vk' AND vk_id IS NOT NULL"
+            "   AND display_name IS NOT NULL AND display_name <> ''"
+        ):
+            out[int(row[0])] = row[1]
+    return out
+
+
 def _find_chat_rel(discovery, source_folder: str) -> str | None:
     """Match a DB-stored `source_folder` (basename) to one of the rel
     paths discovery returned (which include the `messages/` prefix).
@@ -437,6 +453,7 @@ def _render_chat(
         pages_dir=pages_dir,
         static_root=static_root,
         url_to_meta=url_to_meta,
+        user_names=_build_user_names(),
         log=progress.log,
     )
 

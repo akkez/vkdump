@@ -18,6 +18,21 @@ _MESSAGE_OPEN_RE = re.compile(
     r'<div\s+class="message"\s+data-id="(?P<id>\d+)">'
 )
 
+# Sender link inside the message header. Same shape as the parser's
+# `_HEADER_LINK_RE` but tighter, since here we only care about
+# `id<num>` and `public<num>`/`club<num>`/`event<num>` (which we
+# represent with a negative peer id in DB).
+_SENDER_LINK_RE = re.compile(
+    r'(<div class="message__header">[^<]*'
+    r'<a href="https://vk\.com/)'
+    r'(?P<prefix>id|public|club|event)'
+    r'(?P<num>\d+)'
+    r'(?P<after>"[^>]*>)'
+    r'(?P<name>[^<]*)'
+    r'(</a>)',
+    re.DOTALL,
+)
+
 # Matches an `attachment__description` div ending right before the
 # search-region boundary — used to detect a description that sits
 # immediately above a given `attachment__link` so the inliner can
@@ -249,6 +264,45 @@ class InlinePhotosTransform:
         return html[:splice_start] + tag + html[end:]
 
 
+class SenderNameFromDBTransform:
+    """Swap the sender display-name text inside ``<div class="message__header">``
+    with the current value from ``users.display_name``.
+
+    The original ``<a href="https://vk.com/idN">…</a>`` link is
+    preserved verbatim — only the visible link text changes. This is
+    what surfaces the bracketed ``"DELETED (Real Name)"`` form for
+    re-identified deleted users (without it the rendered HTML would
+    still show whatever the VK exporter wrote at dump time — typically
+    just "DELETED").
+
+    Community senders (``public``/``club``/``event``) use a negative
+    peer id in our DB convention, so the lookup keys flip sign.
+    """
+
+    name = "sender_name_from_db"
+
+    def apply(self, msg: ParsedMessage, ctx: TransformContext) -> ParsedMessage:
+        if not ctx.user_names:
+            return msg
+
+        def _sub(m: re.Match[str]) -> str:
+            num = int(m.group("num"))
+            vk_id = num if m.group("prefix") == "id" else -num
+            name = ctx.user_names.get(vk_id)
+            if not name or name == m.group("name"):
+                return m.group(0)
+            return (
+                m.group(1) + m.group("prefix") + m.group("num")
+                + m.group("after") + html_escape(name, quote=False)
+                + m.group(6)
+            )
+
+        new_html, n = _SENDER_LINK_RE.subn(_sub, msg.raw_html, count=1)
+        if n:
+            msg.raw_html = new_html
+        return msg
+
+
 class MessageAnchorTransform:
     """Add ``id="m<vk_message_id>"`` to each ``<div class="message">``
     block so deep links of the form ``messagesN.html#m361522`` jump
@@ -272,6 +326,7 @@ class MessageAnchorTransform:
 # Order matters: anchor first so InlinePhotos sees the augmented opening
 # tag (it doesn't depend on it, but keeps the chain easier to reason about).
 DEFAULT_TRANSFORMS: list[Transform] = [
+    SenderNameFromDBTransform(),
     MessageAnchorTransform(),
     InlinePhotosTransform(),
 ]

@@ -49,6 +49,12 @@ class TransformContext:
     # chat's successfully downloaded attachments. Built once upfront so
     # transforms don't hit the DB per message.
     url_to_meta: dict[str, AttMeta]
+    # vk_id → users.display_name for every user the DB knows. The
+    # sender-name transform reads this to swap the original VK-export
+    # name in the message header for the current DB value — in
+    # particular the bracketed ``"DELETED (...)"`` form that the
+    # deleted-labels backfill writes for re-identified deleted users.
+    user_names: dict[int, str] = field(default_factory=dict)
     # Hardlink/copy bookkeeping: maps the absolute source path on disk to
     # the path under output_chat_dir we wrote it to. Lets the renderer
     # dedupe identical assets (same URL across many messages → one file).

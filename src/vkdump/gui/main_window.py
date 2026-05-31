@@ -30,6 +30,9 @@ class MainWindow(QMainWindow):
         for task in TASKS:
             if task.name == "stats":
                 self._stats_view = StatsView()
+                # Stats rollups re-run on data_changed so account
+                # switches / new imports show fresh numbers.
+                self.data_changed.connect(self._stats_view.refresh)
                 self._tabs.addTab(self._stats_view, "Stats")
             else:
                 panel = TaskPanel(task)

@@ -300,6 +300,23 @@ class StatsView(QWidget):
         self._started = True
         self._start_loaders()
 
+    def refresh(self) -> None:
+        """Re-run all rollups against the current DB state. Called by
+        the main window's `data_changed` bus when an account is picked
+        or a mutating task finishes. No-op when the user hasn't yet
+        opened the Stats tab — nothing to refresh.
+        """
+        if not self._started:
+            return
+        self.cancel_all()
+        self._runnables.clear()
+        # Restore the "loading…" labels so the user sees the refresh
+        # happen rather than wondering if anything changed.
+        self._tabs.setTabText(self._chats_idx, "Chats (loading…)")
+        self._tabs.setTabText(self._users_idx, "Users (loading…)")
+        self._tabs.setTabText(self._att_idx, "Attachments (loading…)")
+        self._start_loaders()
+
     def cancel_all(self) -> None:
         """Interrupt any in-flight rollup queries. Safe to call from the
         GUI thread; uses `sqlite3.Connection.interrupt()` under the hood.

@@ -7,11 +7,17 @@ Chats / users are pre-filtered by `min_messages` (default 10) in SQL,
 which keeps the heavy attachments × messages JOIN scoped to the
 visible rows. The hidden count is returned alongside so the dialog
 can footer-label it.
+
+When ``app_config['active_account_id']`` is set, every rollup is
+filtered by that account — chats / messages / attachments / users
+from other accounts fall out of the visible tables. Unset → whole-DB
+rollup as before.
 """
 from __future__ import annotations
 
 from typing import Any
 
+from . import app_config
 from .db import connection
 
 
@@ -34,16 +40,25 @@ def _kind_case(prefix: str = "") -> str:
     return ",\n               ".join(parts)
 
 
+def _active_account() -> str | None:
+    a = (app_config.get("active_account_id") or "").strip()
+    return a or None
+
+
 def chats_rollup(min_messages: int = 10) -> tuple[list[dict[str, Any]], int]:
     """Visible chats + count of those hidden below the threshold."""
+    active = _active_account()
+    acct_filter = " AND account_id = ?" if active else ""
+    acct_args: tuple = (active,) if active else ()
+
     with connection() as conn:
         hidden = conn.execute(
-            "SELECT COUNT(*) FROM chats WHERE message_count < ?",
-            (min_messages,),
+            f"SELECT COUNT(*) FROM chats WHERE message_count < ?{acct_filter}",
+            (min_messages, *acct_args),
         ).fetchone()[0]
         sql = f"""
         WITH visible AS (
-            SELECT id FROM chats WHERE message_count >= ?
+            SELECT id FROM chats WHERE message_count >= ?{acct_filter}
         ),
         att AS (
             SELECT m.chat_id AS chat_id,
@@ -75,26 +90,32 @@ def chats_rollup(min_messages: int = 10) -> tuple[list[dict[str, Any]], int]:
          WHERE c.id IN (SELECT id FROM visible)
          ORDER BY c.message_count DESC, c.id
         """
-        rows = [dict(r) for r in conn.execute(sql, (min_messages,))]
+        rows = [dict(r) for r in conn.execute(sql, (min_messages, *acct_args))]
         return rows, hidden
 
 
 def users_rollup(min_messages: int = 10) -> tuple[list[dict[str, Any]], int]:
-    """Visible users (≥ min_messages messages) + hidden count."""
+    """Visible users (≥ min_messages messages) + hidden count.
+
+    A user is "in scope" of an account if they sent at least one
+    message inside that account's chats. So the filter applies at
+    the messages-counting stage.
+    """
+    active = _active_account()
+    msg_where = "WHERE account_id = ?" if active else ""
+    msg_args: tuple = (active,) if active else ()
+
     with connection() as conn:
-        msg_counts_sql = """
+        msg_counts_sql = f"""
             SELECT sender_user_id, COUNT(*) AS message_count
               FROM messages
-             WHERE sender_user_id IS NOT NULL
+             {msg_where + (' AND ' if msg_where else 'WHERE ')}sender_user_id IS NOT NULL
              GROUP BY sender_user_id
         """
-        # Two passes against msg_counts: one to count hidden, one to
-        # drive the JOIN. Materialising into a temp table would be
-        # cleaner but stdlib sqlite3 doesn't carry one across queries.
         hidden = conn.execute(
             f"""SELECT COUNT(*) FROM ({msg_counts_sql})
                  WHERE message_count > 0 AND message_count < ?""",
-            (min_messages,),
+            (*msg_args, min_messages),
         ).fetchone()[0]
 
         sql = f"""
@@ -109,6 +130,7 @@ def users_rollup(min_messages: int = 10) -> tuple[list[dict[str, Any]], int]:
               FROM attachments a
               JOIN messages m ON m.id = a.message_id
              WHERE m.sender_user_id IN (SELECT sender_user_id FROM visible)
+               {('AND m.account_id = ?' if active else '')}
              GROUP BY m.sender_user_id
         )
         SELECT u.id,
@@ -131,7 +153,10 @@ def users_rollup(min_messages: int = 10) -> tuple[list[dict[str, Any]], int]:
          WHERE u.id IN (SELECT sender_user_id FROM visible)
          ORDER BY msg.message_count DESC, u.id
         """
-        rows = [dict(r) for r in conn.execute(sql, (min_messages,))]
+        # Param ordering: msg_args (msg CTE) + min_messages (visible) +
+        # msg_args again (att CTE when active is set, otherwise nothing).
+        params: tuple = (*msg_args, min_messages, *(msg_args if active else ()))
+        rows = [dict(r) for r in conn.execute(sql, params)]
         return rows, hidden
 
 
@@ -145,7 +170,11 @@ def attachments_rollup() -> list[dict[str, Any]]:
     aggregate, all other selected columns take values from the input row
     that produced the max.
     """
-    sql = """
+    active = _active_account()
+    msg_filter = "WHERE m.account_id = ?" if active else ""
+    args: tuple = (active, active) if active else ()  # one per subquery
+
+    sql = f"""
     SELECT pk.kind,
            pk.total,
            pk.first_seen_at,
@@ -158,6 +187,7 @@ def attachments_rollup() -> list[dict[str, Any]]:
                MIN(m.sent_at)  AS first_seen_at
           FROM attachments a
           JOIN messages m ON m.id = a.message_id
+         {msg_filter}
          GROUP BY a.kind
       ) pk
       LEFT JOIN (
@@ -168,9 +198,10 @@ def attachments_rollup() -> list[dict[str, Any]]:
           FROM attachments a
           JOIN messages m ON m.id = a.message_id
           LEFT JOIN chats c ON c.id = m.chat_id
+         {msg_filter}
          GROUP BY a.kind
       ) lk ON lk.kind = pk.kind
      ORDER BY pk.total DESC
     """
     with connection() as conn:
-        return [dict(r) for r in conn.execute(sql)]
+        return [dict(r) for r in conn.execute(sql, args)]

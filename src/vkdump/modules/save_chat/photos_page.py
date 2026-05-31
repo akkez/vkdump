@@ -402,12 +402,12 @@ def _render_sender_nav(
     senders_left = start  # all senders before the current window
     senders_right = len(senders) - (start + len(window))  # all senders past it
 
-    if nav_page_idx == 0:
-        prev_html = (
-            '<span class="pager-arrow disabled">'
-            f'&laquo;&laquo;&laquo; prev ({senders_left})</span>'
-        )
-    else:
+    # Arrows are omitted entirely when there is nothing to navigate
+    # to — no disabled-state placeholder. Visually that means the
+    # leftmost window has only the right arrow, the rightmost has
+    # only the left arrow.
+    prev_html = ""
+    if nav_page_idx > 0:
         prev_target = (
             _MAIN_FILE if nav_page_idx == 1
             else _sender_filename(senders[(nav_page_idx - 1) * _NAV_PAGE_SIZE])
@@ -417,23 +417,21 @@ def _render_sender_nav(
             f'&laquo;&laquo;&laquo; prev ({senders_left})</a>'
         )
 
+    next_html = ""
     if nav_page_idx + 1 < total_pages:
         next_target = _sender_filename(senders[(nav_page_idx + 1) * _NAV_PAGE_SIZE])
         next_html = (
             f'<a class="pager-arrow" href="{html_escape(next_target, quote=True)}">'
             f'next ({senders_right}) &raquo;&raquo;&raquo;</a>'
         )
-    else:
-        next_html = (
-            '<span class="pager-arrow disabled">'
-            f'next ({senders_right}) &raquo;&raquo;&raquo;</span>'
-        )
 
-    return (
-        '<nav class="sender-nav">'
-        f'{everyone_chip} {prev_html} {chips_html} {next_html}'
-        '</nav>'
-    )
+    parts = [everyone_chip]
+    if prev_html:
+        parts.append(prev_html)
+    parts.append(chips_html)
+    if next_html:
+        parts.append(next_html)
+    return f'<nav class="sender-nav">{" ".join(parts)}</nav>'
 
 
 def _render_html(
@@ -562,8 +560,6 @@ body{font:14px/1.45 -apple-system,Segoe UI,sans-serif;margin:0;background:#fafaf
 .pager-arrow{color:#666;font-size:12px;text-decoration:none;
   padding:0 4px;border-radius:3px}
 .pager-arrow:hover{background:#eef4fb;color:#0a66c2;text-decoration:none}
-.pager-arrow.disabled{color:#ccc;cursor:default}
-.pager-arrow.disabled:hover{background:transparent;color:#ccc}
 .sender-nav a,.year-nav a{color:#0a66c2;text-decoration:none}
 .sender-nav a:hover,.year-nav a:hover{text-decoration:underline}
 .sender-nav a.active,.year-nav a.active{color:#222;font-weight:600;text-decoration:none}

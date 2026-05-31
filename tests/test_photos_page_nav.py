@@ -68,33 +68,31 @@ def test_single_window_no_pager_arrows() -> None:
     assert 'href="aa-5.html"' in html
 
 
-def test_everyone_view_prev_disabled_next_to_first_sender_of_window_1() -> None:
-    """On `index.html` (current=None, window 0) prev is disabled
-    because nothing sits left of the first window. Next jumps to the
-    first sender of window 1 (sender at index 30 — slug `aa-31`)."""
+def test_everyone_view_omits_prev_emits_next() -> None:
+    """On `index.html` (current=None, window 0) there is nothing to
+    the left, so the prev arrow is omitted entirely — no disabled
+    placeholder. Next still jumps to the first sender of window 1."""
     html = _render_sender_nav(_mk_senders(75), current=None,
                               total_photos=100, nav_page_idx=0)
-    # Prev disabled, with a 0 counter.
-    assert 'class="pager-arrow disabled"' in html
-    assert "prev (0)" in html
+    assert "prev" not in html
+    assert "disabled" not in html
     # Next link points at the first sender of window 1.
     assert 'class="pager-arrow" href="aa-31.html"' in html
     # 45 senders sit on windows past 0 (75 - 30 = 45).
     assert "next (45)" in html
 
 
-def test_middle_window_prev_jumps_to_first_sender_of_previous_window() -> None:
-    """On a sender in window 2, prev goes to first sender of window 1
-    (slug `aa-31`), NOT back to `index.html`."""
+def test_last_window_omits_next_emits_prev() -> None:
+    """Mirror case: on the rightmost window the next arrow is
+    omitted entirely."""
     senders = _mk_senders(75)
-    target = senders[65]  # index 65 → window 2
+    target = senders[65]  # index 65 → window 2 (last)
     html = _render_sender_nav(senders, current=target,
                               total_photos=1, nav_page_idx=2)
+    assert "next" not in html
+    assert "disabled" not in html
     assert 'class="pager-arrow" href="aa-31.html"' in html
     assert "prev (60)" in html
-    # Window 2 is the last — next disabled.
-    assert "next (0)" in html
-    assert 'class="pager-arrow disabled">next' in html
 
 
 def test_window_1_prev_goes_back_to_index_html() -> None:

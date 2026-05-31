@@ -25,7 +25,7 @@ import signal
 import sqlite3
 import ssl
 import time
-from collections import deque
+from collections import Counter, deque
 from pathlib import Path
 
 import aiohttp
@@ -73,6 +73,32 @@ VALID_STRATEGIES = (
     "my-uploads-first",
 )
 DEFAULT_STRATEGY = "newest-first"
+
+
+_HTTP_RE = re.compile(r"^HTTP\s+\d+$")
+_TIMEOUT_RE = re.compile(r"^timeout\b")
+_EXC_PREFIX_RE = re.compile(r"^(?P<klass>[A-Za-z_][A-Za-z0-9_]*):")
+
+
+def _classify_error(error: str | None) -> str:
+    """Bucket a per-attempt ``error`` string into a coarse reason label
+    suitable for end-of-run grouping. Keeps HTTP status codes verbatim
+    (``"HTTP 404"``), collapses timeouts to ``"timeout"``, and strips
+    exception messages down to their class (``"ClientConnectorError:
+    cannot connect"`` → ``"ClientConnectorError"``). Anything else
+    falls into ``"other"`` so the bucketing stays bounded.
+    """
+    if not error:
+        return "other"
+    s = error.strip()
+    if _HTTP_RE.match(s):
+        return s
+    if _TIMEOUT_RE.match(s):
+        return "timeout"
+    m = _EXC_PREFIX_RE.match(s)
+    if m:
+        return m.group("klass")
+    return "other"
 
 
 def run(params: dict, progress: ProgressReporter) -> dict:
@@ -182,6 +208,15 @@ def run(params: dict, progress: ProgressReporter) -> dict:
         f"ok={stats['ok']} failed={stats['failed']} skipped={stats['skipped']}, "
         f"total {_fmt_bytes(stats.get('bytes', 0))}"
     )
+    fail_reasons = stats.get("fail_reasons") or {}
+    if fail_reasons:
+        breakdown = ", ".join(
+            f"{n}× {reason}"
+            for reason, n in sorted(
+                fail_reasons.items(), key=lambda kv: (-kv[1], kv[0])
+            )
+        )
+        progress.log(f"enrich-media: failure breakdown — {breakdown}")
     return {
         "kinds": list(kinds),
         "selected": len(rows),
@@ -189,6 +224,7 @@ def run(params: dict, progress: ProgressReporter) -> dict:
         "downloaded": stats["ok"],
         "failed": stats["failed"],
         "skipped": stats["skipped"],
+        "fail_reasons": fail_reasons,
         "bytes_downloaded": stats.get("bytes", 0),
         "elapsed_seconds": elapsed,
     }
@@ -457,6 +493,9 @@ async def _download_all(
     headers = {"User-Agent": DEFAULT_USER_AGENT, "Accept": "image/*,*/*;q=0.8"}
 
     stats = {STATUS_OK: 0, STATUS_FAILED: 0, STATUS_SKIPPED: 0}
+    # Per-bucket count of failure reasons (HTTP 404, timeout, …) so the
+    # end-of-run summary doesn't have to re-scan the DB.
+    fail_reasons: Counter[str] = Counter()
     # `done`/`total` are the bar-facing counters: they include the
     # rows that were already-resolved before this run started (`done_offset`),
     # so a resumed run picks up at 10001/30000 instead of 1/20000.
@@ -522,6 +561,8 @@ async def _download_all(
                     }
                 _persist_result(row["id"], row["url"], result)
                 stats[result["status"]] = stats.get(result["status"], 0) + 1
+                if result["status"] == STATUS_FAILED:
+                    fail_reasons[_classify_error(result.get("error"))] += 1
                 done += 1
                 bytes_total += int(result.get("file_size") or 0)
                 now = time.monotonic()
@@ -556,6 +597,7 @@ async def _download_all(
                     pass
 
     stats["bytes"] = bytes_total
+    stats["fail_reasons"] = dict(fail_reasons)
     if stop.is_set():
         progress.log("enrich-media: cancelled — in-flight fetches finished cleanly")
         raise Cancelled()

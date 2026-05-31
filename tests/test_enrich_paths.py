@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from vkdump.modules.enrich import _ext_from_bytes, _ext_from_url, _rel_path_for
+from vkdump.modules.enrich import (
+    _classify_error,
+    _ext_from_bytes,
+    _ext_from_url,
+    _rel_path_for,
+)
 
 
 def test_rel_path_shape() -> None:
@@ -78,3 +83,29 @@ def test_kind_segregation() -> None:
     assert photo.parts[0] == "photo"
     assert video.parts[0] == "video"
     assert photo.parts[1:] == video.parts[1:]  # same hash, same bucket+name
+
+
+# ---------- _classify_error ----------
+
+
+def test_classify_error_http_status_kept_verbatim() -> None:
+    assert _classify_error("HTTP 404") == "HTTP 404"
+    assert _classify_error("HTTP 500") == "HTTP 500"
+
+
+def test_classify_error_timeout_collapsed() -> None:
+    assert _classify_error("timeout after 20s") == "timeout"
+    assert _classify_error("timeout") == "timeout"
+
+
+def test_classify_error_strips_exception_message_to_class() -> None:
+    assert _classify_error(
+        "ClientConnectorError: Cannot connect to host example.com:443"
+    ) == "ClientConnectorError"
+    assert _classify_error("ValueError: bad URL") == "ValueError"
+
+
+def test_classify_error_unknown_shapes_go_to_other() -> None:
+    assert _classify_error(None) == "other"
+    assert _classify_error("") == "other"
+    assert _classify_error("something weird without a class prefix") == "other"

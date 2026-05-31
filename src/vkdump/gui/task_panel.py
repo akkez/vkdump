@@ -264,9 +264,15 @@ class TaskPanel(QWidget):
         # (cheap — two COUNT(*) queries) so modules don't have to wire
         # the count through their progress signals.
         self._errors_label = QLabel("")
+        # Base stylesheet stays neutral — each chunk colours itself via
+        # an inline <span> in `_on_errors_polled`. Parse errors stay
+        # red (they mean rows that didn't reach the DB at all); failed
+        # downloads get amber (degraded but recoverable — the row is
+        # there, just no asset on disk yet).
         self._errors_label.setStyleSheet(
-            "color: #d63a3a; font-weight: 600; padding: 2px 0;"
+            "font-weight: 600; padding: 2px 0;"
         )
+        self._errors_label.setTextFormat(Qt.TextFormat.RichText)
         self._errors_label.setVisible(False)
         self._errors_timer = QTimer(self)
         self._errors_timer.setInterval(1000)
@@ -661,9 +667,13 @@ class TaskPanel(QWidget):
         self._errors_inflight = None
         chunks: list[str] = []
         if parse_n:
-            chunks.append(f"{parse_n} parse errors")
+            chunks.append(
+                f'<span style="color:#d63a3a">{parse_n} parse errors</span>'
+            )
         if download_n:
-            chunks.append(f"{download_n} failed downloads")
+            chunks.append(
+                f'<span style="color:#e07b00">{download_n} failed downloads</span>'
+            )
         if chunks:
             self._errors_label.setText(" · ".join(chunks))
             self._errors_label.setVisible(True)

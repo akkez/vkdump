@@ -34,8 +34,12 @@ _ACTIVE_KEY = "active_account_id"
 
 def _account_choices() -> list[tuple[str, str]]:
     """Return ``(vk_id, label)`` for every row in ``accounts``, busiest
-    first by total message count of that account's chats. The first
-    sentinel ``("", "— none —")`` is the unfiltered choice.
+    first by total message count of that account's chats.
+
+    The ``("", "— none —")`` sentinel is only included when there are
+    no real account rows yet — once even one account exists, dropping
+    it forces the user to a concrete pick (and prevents picking the
+    empty-string value that disables the chat-scope filter).
     """
     sentinel: list[tuple[str, str]] = [("", "— none —")]
     try:
@@ -56,7 +60,9 @@ def _account_choices() -> list[tuple[str, str]]:
             ).fetchall()
     except Exception:
         return sentinel
-    out: list[tuple[str, str]] = list(sentinel)
+    if not rows:
+        return sentinel
+    out: list[tuple[str, str]] = []
     for r in rows:
         vk_id = str(r["vk_id"])
         name = (r["name"] or "").strip()

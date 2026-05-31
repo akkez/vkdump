@@ -321,7 +321,7 @@ def parse_chat_event(
             payload["pinned_excerpt_truncated"] = True
 
     pt = (plain_text or "").strip()
-    if pt and pt != _canonical_plain(payload):
+    if pt:
         payload["fallback_text"] = pt
 
     return ParsedAttachment(
@@ -342,32 +342,3 @@ def _match_subtype(
         if pat.fullmatch(residue):
             return sub, "en"
     return None, "ru"
-
-
-def _canonical_plain(payload: ChatEventPayload) -> str:
-    """Best-effort plain-text rendering of `payload` so we can compare against
-    the message-body text and suppress fallback_text when it adds nothing.
-    Intentionally minimal — only used to detect "trivial duplicate".
-    """
-    actor = payload["actor"]["display_name"]
-    target = payload.get("target", {}).get("display_name", "")
-    after = payload.get("title_after", "")
-    sub = payload["subtype"]
-    canonical: dict[ChatEventSubtype, str] = {
-        "leave": f"{actor} left the chat",
-        "rejoin": f"{actor} returned to the chat",
-        "join_by_link": f"{actor} joined the chat via link",
-        "invite": f"{actor} invited {target}",
-        "kick": f"{actor} removed {target}",
-        "chat_create": f"{actor} created chat «{after}»",
-        "chat_rename": f"{actor} renamed chat",
-        "chat_photo_set": f"{actor} updated chat photo",
-        "chat_photo_removed": f"{actor} removed chat photo",
-        "message_pin": f"{actor} pinned a message",
-        "message_unpin": f"{actor} unpinned a message",
-        "screenshot": f"{actor} took a chat screenshot",
-        "call_start": f"{actor} started a group call",
-        "chat_theme_change": f"{actor} changed chat theme",
-        "chat_theme_reset": f"{actor} reset chat theme",
-    }
-    return canonical[sub]

@@ -189,9 +189,10 @@ def test_theme_reset() -> None:
 # ----------------------------- fallback_text -----------------------------
 
 
-def test_fallback_text_kept_when_different_from_canonical() -> None:
+def test_fallback_text_kept_verbatim() -> None:
     """Old VK dumps occasionally render a different/unrelated plain text
-    outside the kludges block. Both names matter — fallback_text keeps it.
+    outside the kludges block. Both names matter — fallback_text keeps it
+    verbatim whenever the body text is non-empty.
     """
     att = parse_chat_event(
         f"{_u(100, 'Sample Actor')} вышел из чата",
@@ -200,11 +201,8 @@ def test_fallback_text_kept_when_different_from_canonical() -> None:
     assert att and att.data["fallback_text"] == "Sample Other left the conversation"
 
 
-def test_fallback_text_omitted_when_canonical_duplicate() -> None:
-    att = parse_chat_event(
-        f"{_u(100, 'Sample Actor')} вышел из чата",
-        plain_text="Sample Actor left the chat",
-    )
+def test_fallback_text_omitted_when_body_empty() -> None:
+    att = parse_chat_event(f"{_u(100, 'Sample Actor')} вышел из чата", plain_text="")
     assert att and "fallback_text" not in att.data
 
 

@@ -227,53 +227,31 @@ def test_feed_many_handles_none() -> None:
     assert p.pick(100) == ("Aa Bb", "pair")
 
 
-# ---- pick_multi + format_combined_label ----
+# ---- format_combined_label + re-run input filtering ----
 
 
-def test_pick_multi_returns_event_then_inline_pair() -> None:
-    p = DeletedLabelPicker([100])
-    p.feed_chat_event(_payload(
-        subtype="leave",
-        actor={"vk_id": 100, "display_name": "Aa Bb",
-               "profile_url": "https://vk.com/id100"},
-    ))
-    p.feed("[id100|Cc Dd]")
-    assert p.pick_multi(100) == [("Aa Bb", "event"), ("Cc Dd", "pair")]
+def test_format_combined_label_none() -> None:
+    assert format_combined_label(None) == "DELETED"
+    assert format_combined_label("") == "DELETED"
 
 
-def test_pick_multi_dedupes_identical_label_across_buckets() -> None:
-    """When the same label wins in two buckets, only the higher-priority
-    bucket entry survives — no duplicates in the final list."""
-    p = DeletedLabelPicker([100])
-    p.feed_chat_event(_payload(
-        subtype="leave",
-        actor={"vk_id": 100, "display_name": "Aa Bb",
-               "profile_url": "https://vk.com/id100"},
-    ))
-    p.feed("[id100|Aa Bb]")
-    assert p.pick_multi(100) == [("Aa Bb", "event")]
+def test_format_combined_label_skips_bare_DELETED() -> None:
+    """Defensive: a caller passing the placeholder string itself
+    should still get a clean bare DELETED, not 'DELETED (DELETED)'."""
+    assert format_combined_label("DELETED") == "DELETED"
 
 
-def test_pick_multi_empty_for_unknown_user() -> None:
-    p = DeletedLabelPicker([100])
-    assert p.pick_multi(100) == []
-    assert p.pick_multi(999) == []
+def test_format_combined_label_skips_bracketed_re_run() -> None:
+    """A previous run's bracketed output, if it somehow reaches the
+    formatter, must not get re-wrapped."""
+    assert format_combined_label("DELETED (Aa Bb)") == "DELETED"
 
 
-def test_pick_multi_collects_pair_at_single_when_no_event() -> None:
-    p = DeletedLabelPicker([100])
-    p.feed("[id100|Aa Bb]")
-    p.feed("[id100|@handle]")
-    p.feed("[id100|Mononym]")
-    picks = p.pick_multi(100)
-    assert picks == [
-        ("Aa Bb", "pair"),
-        ("@handle", "at"),
-        ("Mononym", "single"),
-    ]
+def test_format_combined_label_real_name() -> None:
+    assert format_combined_label("Aa Bb") == "DELETED (Aa Bb)"
 
 
-def test_pick_multi_ignores_re_run_output() -> None:
+def test_picker_ignores_re_run_output_in_inputs() -> None:
     """Mentions / event names that look like a prior run's bracketed
     output ('DELETED (...)') must not feed back into the picker —
     otherwise re-runs would compound their own labels."""
@@ -285,17 +263,4 @@ def test_pick_multi_ignores_re_run_output() -> None:
         actor={"vk_id": 100, "display_name": "DELETED (Aa Bb)",
                "profile_url": "https://vk.com/id100"},
     ))
-    assert p.pick_multi(100) == []
-
-
-def test_format_combined_label_no_picks() -> None:
-    assert format_combined_label([]) == "DELETED"
-
-
-def test_format_combined_label_one_pick() -> None:
-    assert format_combined_label([("Aa Bb", "event")]) == "DELETED (Aa Bb)"
-
-
-def test_format_combined_label_two_picks_slash_joined() -> None:
-    picks = [("Aa Bb", "event"), ("Cc Dd", "pair")]
-    assert format_combined_label(picks) == "DELETED (Aa Bb / Cc Dd)"
+    assert p.pick(100) == ("DELETED", "fallback")

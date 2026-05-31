@@ -386,10 +386,10 @@ def _backfill_deleted_labels(progress: ProgressReporter) -> int:
 
         updated = 0
         for vk_id in deleted:
-            picks = picker.pick_multi(vk_id)
-            if not picks:
+            best_label, bucket = picker.pick(vk_id)
+            if bucket == "fallback":
                 continue
-            label = format_combined_label(picks)
+            label = format_combined_label(best_label)
             conn.execute(
                 "UPDATE users SET display_name=?"
                 " WHERE provider=? AND vk_id=? AND is_deleted=1",

@@ -119,6 +119,19 @@ def _run_with_discovery(
                     f"generated_at={archive_footer.generated_at} "
                     f"duration={archive_footer.duration_seconds}s"
                 )
+                if archive_footer.lang == "unknown" and archive_footer.raw_text:
+                    # New locale variant — surface the raw text loudly
+                    # (both progress log and a logger.warning) so the
+                    # next regex extension knows what to match.
+                    progress.log(
+                        "archive footer: UNRECOGNISED — please extend"
+                        " parsers/vk/footer.py with a regex covering:"
+                        f" {archive_footer.raw_text!r}"
+                    )
+                    logger.warning(
+                        "archive footer locale not recognised; raw_text={!r}",
+                        archive_footer.raw_text,
+                    )
         except Exception:
             logger.exception("archive footer parsing failed for {}", discovery.index_file)
             progress.log(f"archive footer: failed to parse {discovery.index_file} (continuing)")

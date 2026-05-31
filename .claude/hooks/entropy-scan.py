@@ -21,17 +21,17 @@ Detection heuristics (any match → exit 2, blocking the tool call):
 - Cyrillic capitalised-word pair ≥3 letters each (e.g.
   `[А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ][а-яё]{2,}`). Synthetic 2-letter
   placeholders like `Aa Bb` don't match.
-- Numeric vk-id-looking strings: standalone 7-12 digit numbers
-  *outside* the synthetic id allowlist (≤999) and outside the known
-  VK chat-folder convention prefix `2000000` (which the codebase
-  already references generically).
+- Numeric vk-id-looking strings: standalone 5-12 digit numbers
+  outside the known VK chat-folder convention prefix `2000000`
+  (which the codebase already references generically). Anything ≤4
+  digits is treated as too low-entropy to bother with.
 
 Synthetic allowlists:
 
 - Years in dates: any of `2020`, `2024`.
 - Durations: `1,234.56`, `9,999.99`.
-- Ids: standalone numbers ≤ 999 are ignored; standalone 2000000XXX
-  (chat-folder format demo) is ignored.
+- Ids: standalone numbers ≤4 digits are ignored; standalone
+  2000000XXX (chat-folder format demo) is ignored.
 
 Invocation: stdin = JSON hook payload (Claude Code spec). Reads
 `tool_name` + `tool_input`. Block by exit 2 + stderr message.
@@ -80,7 +80,7 @@ _CYRILLIC_NAME_PAIR_RE = re.compile(
     r"[А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ][а-яё]{2,}"
 )
 
-_NUMERIC_ID_RE = re.compile(r"(?<![\d.])\d{7,12}(?![\d.])")
+_NUMERIC_ID_RE = re.compile(r"(?<![\d.])\d{5,12}(?![\d.])")
 _ID_ALLOWLIST_PREFIXES = ("2000000",)
 
 
@@ -126,7 +126,7 @@ def _scan_text(text: str, path: str = "") -> list[str]:
         if any(token.startswith(p) for p in _ID_ALLOWLIST_PREFIXES):
             continue
         out.append(
-            f"bare 7-12 digit id outside synthetic range: {token!r}"
+            f"bare 5-12 digit id outside synthetic range: {token!r}"
         )
 
     return out

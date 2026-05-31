@@ -327,6 +327,7 @@ def _run_with_discovery(
             "messages*.html / index-messages.html / page-info.html file."
         )
 
+    owner_names_fixed = _backfill_names_from_accounts(progress)
     deleted_enriched = _backfill_deleted_labels(progress)
 
     elapsed = time.perf_counter() - started_at
@@ -340,10 +341,48 @@ def _run_with_discovery(
         "messages_inserted_this_run": total_messages,
         "errors_this_run": total_errors,
         "deleted_users_enriched": deleted_enriched,
+        "owner_names_overridden": owner_names_fixed,
         "totals": aggregates["totals"],
         "top_chats": aggregates["top_chats"],
         "top_senders": aggregates["top_senders"],
     }
+
+
+def _backfill_names_from_accounts(progress: ProgressReporter) -> int:
+    """Force ``users.display_name`` to match ``accounts.display_name``
+    whenever the existing users row carries a single-word value
+    (no space) — that's the shape `_resolve_sender` leaves after
+    seeing the dump owner's own self-messages (`You` / `Вы`), and
+    accounts is the authoritative source (full name from
+    profile/page-info.html). Multi-word values in users are left
+    alone — they're either a real name pulled from the message
+    header or a `DELETED (Real Name)` from the deleted-labels
+    backfill, neither of which we want to clobber.
+
+    Returns the number of rows updated.
+    """
+    with connection() as conn:
+        cur = conn.execute(
+            "UPDATE users"
+            "   SET display_name = (SELECT a.display_name FROM accounts a"
+            "                        WHERE a.provider = users.provider"
+            "                          AND a.vk_id = users.vk_id)"
+            " WHERE users.display_name IS NOT NULL"
+            "   AND users.display_name NOT LIKE '% %'"
+            "   AND EXISTS (SELECT 1 FROM accounts a"
+            "                WHERE a.provider = users.provider"
+            "                  AND a.vk_id = users.vk_id"
+            "                  AND a.display_name IS NOT NULL"
+            "                  AND a.display_name <> ''"
+            "                  AND a.display_name <> users.display_name)"
+        )
+        n = cur.rowcount or 0
+    if n:
+        progress.log(
+            f"users: overrode {n} display_name from accounts (one-word →"
+            " authoritative full name)"
+        )
+    return n
 
 
 def _backfill_deleted_labels(progress: ProgressReporter) -> int:

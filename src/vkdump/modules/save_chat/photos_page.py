@@ -383,9 +383,6 @@ def _render_html(
         f"{html_escape(current.display_name)}</span>"
         if current else chat_title_html
     )
-    # Calendar-year span, not bucket count. "across 2 years" was misleading
-    # for a chat that had photos only in 2012 and 2016 — actual span is
-    # 5 years. Single-year chats just get the year.
     year_ints = sorted({
         p.sent_at.year for p in photos if p.sent_at is not None
     })

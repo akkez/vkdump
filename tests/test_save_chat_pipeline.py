@@ -17,6 +17,7 @@ from vkdump.modules.save_chat.run import _transform_page
 from vkdump.modules.save_chat.transforms import (
     InlinePhotosTransform,
     MessageAnchorTransform,
+    SelfSenderToLinkTransform,
     SenderNameFromDBTransform,
 )
 from vkdump.modules.save_chat.pipeline import apply_pipeline
@@ -457,6 +458,94 @@ def test_sender_transform_escapes_html_in_name(ctx: TransformContext) -> None:
     html = _page([_msg_block_with_sender(5, 654, "Foo")])
     new_html, _, _ = _transform_page(html, "t.html", ctx)
     assert ">A &amp; &lt;evil&gt;</a>" in new_html
+
+
+# ---------- self-sender transform ----------
+
+
+def test_self_sender_wraps_bare_token_in_link(ctx: TransformContext) -> None:
+    """Bare "Вы" in the header gets a real `<a href=...>` so the owner's
+    messages style up the same as every other sender."""
+    ctx.account_vk_id = 42
+    ctx.user_names = {42: "Owner Name"}
+    html = _page([_msg_block(1, "Вы, 1 янв 2024 в 12:00:00", "")])
+    new_html, _, _ = _transform_page(html, "t.html", ctx)
+    assert '<a href="https://vk.com/id42">Owner Name</a>,' in new_html
+    # Bare token gone from the header (no `>Вы,` left).
+    assert ">Вы," not in new_html
+
+
+def test_self_sender_handles_english_token(ctx: TransformContext) -> None:
+    ctx.account_vk_id = 7
+    ctx.user_names = {7: "Owner Name"}
+    html = _page([_msg_block(1, "You, 1 янв 2024 в 12:00:00", "")])
+    new_html, _, _ = _transform_page(html, "t.html", ctx)
+    assert '<a href="https://vk.com/id7">Owner Name</a>,' in new_html
+    assert ">You," not in new_html
+
+
+def test_self_sender_noop_without_account_vk_id(ctx: TransformContext) -> None:
+    """ctx.account_vk_id stays None on older parse-dump runs that never
+    populated it — must leave the bare token alone."""
+    ctx.account_vk_id = None
+    ctx.user_names = {42: "Owner Name"}
+    html = _page([_msg_block(1, "Вы, 1 янв 2024 в 12:00:00", "")])
+    new_html, _, _ = _transform_page(html, "t.html", ctx)
+    assert ">Вы," in new_html
+    assert "https://vk.com/id" not in new_html
+
+
+def test_self_sender_falls_back_to_token_when_name_unknown(
+    ctx: TransformContext,
+) -> None:
+    """If we know the owner's vk_id but the users table doesn't have a
+    name yet, still wrap the token in a link — the styling is the win."""
+    ctx.account_vk_id = 99
+    ctx.user_names = {}
+    html = _page([_msg_block(1, "Вы, 1 янв 2024 в 12:00:00", "")])
+    new_html, _, _ = _transform_page(html, "t.html", ctx)
+    assert '<a href="https://vk.com/id99">Вы</a>,' in new_html
+
+
+def test_self_sender_does_not_touch_linked_headers(ctx: TransformContext) -> None:
+    """A header that already has an `<a>` link (foreign sender) must
+    pass through this transform untouched."""
+    ctx.account_vk_id = 42
+    ctx.user_names = {42: "Owner Name", 123: "Stranger"}
+    html = _page([_msg_block_with_sender(1, 123, "Stranger")])
+    new_html, _, _ = _transform_page(html, "t.html", ctx)
+    # Stranger's link survives.
+    assert 'href="https://vk.com/id123"' in new_html
+    assert ">Stranger</a>" in new_html
+    # No id42 link sneaks in (this isn't a self message).
+    assert "https://vk.com/id42" not in new_html
+
+
+def test_self_sender_escapes_html_in_owner_name(ctx: TransformContext) -> None:
+    """Owner names with HTML-special characters must be escaped before
+    going back into the markup."""
+    ctx.account_vk_id = 42
+    ctx.user_names = {42: "A & <evil>"}
+    html = _page([_msg_block(1, "Вы, 1 янв 2024 в 12:00:00", "")])
+    new_html, _, _ = _transform_page(html, "t.html", ctx)
+    assert '<a href="https://vk.com/id42">A &amp; &lt;evil&gt;</a>,' in new_html
+
+
+def test_self_sender_isolated_unit(ctx: TransformContext) -> None:
+    """Direct unit test on the transform — sanity-check the regex
+    independent of the full pipeline."""
+    ctx.account_vk_id = 42
+    ctx.user_names = {42: "Owner"}
+    msg = _bare_msg(
+        1,
+        raw_html=(
+            '<div class="message" data-id="1">'
+            '<div class="message__header">Вы, 1 янв 2024 в 12:00:00</div>'
+            '<div>body</div></div>'
+        ),
+    )
+    SelfSenderToLinkTransform().apply(msg, ctx)
+    assert '<a href="https://vk.com/id42">Owner</a>,' in msg.raw_html
 
 
 # ---------- anchor transform ----------

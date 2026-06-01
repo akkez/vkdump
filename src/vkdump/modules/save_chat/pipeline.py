@@ -55,6 +55,13 @@ class TransformContext:
     # particular the bracketed ``"DELETED (...)"`` form that the
     # deleted-labels backfill writes for re-identified deleted users.
     user_names: dict[int, str] = field(default_factory=dict)
+    # vk_id of the dump owner (the "self" sender). VK exports render
+    # the owner's messages with a plain-text "Вы" / "You" token instead
+    # of a link, which makes them visually distinct from every other
+    # sender. The self-sender transform rewrites that token into a real
+    # `<a href="https://vk.com/id<N>">…</a>` so the header is byte-for-
+    # byte the same shape as a foreign sender's header.
+    account_vk_id: int | None = None
     # Hardlink/copy bookkeeping: maps the absolute source path on disk to
     # the path under output_chat_dir we wrote it to. Lets the renderer
     # dedupe identical assets (same URL across many messages → one file).

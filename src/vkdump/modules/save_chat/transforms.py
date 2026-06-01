@@ -33,6 +33,14 @@ _SENDER_LINK_RE = re.compile(
     re.DOTALL,
 )
 
+# Self-sender header — VK writes the dump owner's name as a bare token
+# ("Вы" / "You") instead of an `<a>` link, so this is the one header
+# layout the regex above can't catch. Companion to the parser's
+# `_HEADER_SELF_RE`; kept in sync subtype-for-subtype.
+_SELF_HEADER_RE = re.compile(
+    r'(?P<open><div class="message__header">)\s*(?P<token>Вы|You)\s*,'
+)
+
 # Matches an `attachment__description` div ending right before the
 # search-region boundary — used to detect a description that sits
 # immediately above a given `attachment__link` so the inliner can
@@ -303,6 +311,46 @@ class SenderNameFromDBTransform:
         return msg
 
 
+class SelfSenderToLinkTransform:
+    """Rewrite the self-sender header so the dump owner's messages
+    carry the same `<a href="https://vk.com/id<N>">Name</a>` shape
+    every other sender's header has.
+
+    VK exports render the owner with a bare "Вы" / "You" token (no
+    anchor), which makes their messages visually distinct — VK's own
+    CSS keys off `.message__header a` for the sender colour, so the
+    token stays grey. Wrapping it in a real link restores the colour
+    and lets the deleted-labels / display-name pipeline put the
+    owner's actual name there.
+
+    No-ops when the chat has no `account_vk_id` (e.g. older parse-dump
+    runs that never populated it). When the owner is unknown to the
+    `users` table, falls back to the original token as link text so
+    the styling at least matches.
+    """
+
+    name = "self_sender_to_link"
+
+    def apply(self, msg: ParsedMessage, ctx: TransformContext) -> ParsedMessage:
+        if ctx.account_vk_id is None:
+            return msg
+        vk_id = ctx.account_vk_id
+        name = ctx.user_names.get(vk_id)
+
+        def _sub(m: re.Match[str]) -> str:
+            display = name if name else m.group("token")
+            return (
+                f'{m.group("open")}'
+                f'<a href="https://vk.com/id{vk_id}">'
+                f'{html_escape(display, quote=False)}</a>,'
+            )
+
+        new_html, n = _SELF_HEADER_RE.subn(_sub, msg.raw_html, count=1)
+        if n:
+            msg.raw_html = new_html
+        return msg
+
+
 class MessageAnchorTransform:
     """Add ``id="m<vk_message_id>"`` to each ``<div class="message">``
     block so deep links of the form ``messagesN.html#m361522`` jump
@@ -327,6 +375,7 @@ class MessageAnchorTransform:
 # tag (it doesn't depend on it, but keeps the chain easier to reason about).
 DEFAULT_TRANSFORMS: list[Transform] = [
     SenderNameFromDBTransform(),
+    SelfSenderToLinkTransform(),
     MessageAnchorTransform(),
     InlinePhotosTransform(),
 ]

@@ -347,6 +347,19 @@ def _build_url_meta(chat_id: int) -> dict[str, AttMeta]:
     return out
 
 
+def _coerce_account_vk_id(raw: object) -> int | None:
+    """Parse `chats.account_id` (stored as TEXT, holds the dump owner's
+    vk_id) into an int for the self-sender transform. Returns ``None``
+    on missing / non-numeric values so the transform safely no-ops.
+    """
+    if raw is None:
+        return None
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def _build_user_names() -> dict[int, str]:
     """vk_id → display_name for every known user. One pass over the
     `users` table — cheap even for tens of thousands of rows, and lets
@@ -454,6 +467,7 @@ def _render_chat(
         static_root=static_root,
         url_to_meta=url_to_meta,
         user_names=_build_user_names(),
+        account_vk_id=_coerce_account_vk_id(chat_meta.get("account_id")),
         log=progress.log,
     )
 

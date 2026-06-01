@@ -198,8 +198,12 @@ def _render_html(manifest: ExportManifest) -> str:
         "body{font:14px/1.45 -apple-system,Segoe UI,sans-serif;margin:32px;max-width:900px}"
         "h1{margin:0 0 16px;font-size:20px}"
         "ul{list-style:none;padding:0}"
-        "li{padding:8px 0;border-bottom:1px solid #eee}"
-        "li:target{background:#fff3b0;border-left:3px solid #f0a500;padding-left:8px}"
+        "li{padding:8px 0;border-bottom:1px solid #eee;scroll-margin-top:16px}"
+        "li:target,li.flash{background:#ffe066;border-left:4px solid #f0a500;"
+        "padding-left:10px}"
+        "@keyframes vkdump-flash{0%,100%{background:#ffe066}"
+        "20%,60%{background:#ffae00}}"
+        "li.flash{animation:vkdump-flash 1.6s ease-in-out 2}"
         "a{color:#0a66c2;text-decoration:none}a:hover{text-decoration:underline}"
         ".photos-link{font-size:12px}"
         ".meta{color:#777;font-size:12px}"
@@ -207,5 +211,18 @@ def _render_html(manifest: ExportManifest) -> str:
         "</head><body>"
         f"<h1>Exported chats ({len(manifest.chats)})</h1>"
         "<ul>" + "\n".join(rows) + "</ul>"
+        # Inline fallback — :target alone is unreliable when the
+        # document is large enough that the browser navigates to the
+        # fragment before the relevant <li> has been parsed. We
+        # re-resolve `location.hash`, scroll the row into view, and
+        # add `.flash` so the row visibly pulses even if it was
+        # already on-screen.
+        "<script>"
+        "(function(){var h=location.hash;if(!h||h.length<2)return;"
+        "var el=document.getElementById(h.slice(1));if(!el)return;"
+        "el.scrollIntoView({block:'center'});"
+        "el.classList.add('flash');"
+        "})();"
+        "</script>"
         "</body></html>"
     )

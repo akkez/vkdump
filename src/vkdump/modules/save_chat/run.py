@@ -574,6 +574,7 @@ def _render_chat(
 
     return {
         "chat_slug": chat_slug,
+        "chat_id": int(chat_meta["id"]),
         "peer_id": str(chat_meta["peer_id"]),
         "pages": total,
         "blocks": blocks_total,

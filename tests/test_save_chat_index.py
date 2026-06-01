@@ -60,11 +60,19 @@ def test_fmt_exported_at_returns_raw_when_unparseable() -> None:
 
 
 def test_render_html_emits_chat_anchor_id() -> None:
-    """Each row carries `id="chat-<slug>"` so the GUI can deep-link
-    with `index.html#chat-<slug>`."""
-    manifest = ExportManifest(chats=[_entry(chat_slug="42_Hello")])
+    """Each row carries `id="chat-<chat_id>"` so the GUI can deep-link
+    with `index.html#chat-<id>` — numeric and stable across renames."""
+    manifest = ExportManifest(chats=[_entry(chat_id=274, chat_slug="274_Hello")])
     html = _render_html(manifest)
-    assert 'id="chat-42_Hello"' in html
+    assert 'id="chat-274"' in html
+
+
+def test_render_html_omits_id_when_chat_id_unknown() -> None:
+    """Sidecars written before `chat_id` was tracked have chat_id=0;
+    no anchor id should be emitted in that case."""
+    manifest = ExportManifest(chats=[_entry(chat_id=0)])
+    html = _render_html(manifest)
+    assert "id=\"chat-" not in html
 
 
 def test_render_html_normalises_legacy_iso_timestamp() -> None:
@@ -109,41 +117,41 @@ def test_upsert_writes_clean_timestamp_format(tmp_path: Path) -> None:
     assert c["exported_at"][13] == ":"
 
 
-def test_open_path_appends_chat_slug_anchor(tmp_path: Path) -> None:
+def test_open_path_appends_chat_id_anchor(tmp_path: Path) -> None:
     """A specific-chat run yields an Open Output path with a
-    `#chat-<slug>` fragment so the index opens scrolled to that row."""
+    `#chat-<id>` fragment so the index opens scrolled to that row."""
     from vkdump.tasks.registry import _save_chat_open_path
 
     # Pre-populate the output dir with an index.html — the open_path
     # callable refuses to point at a missing file.
     upsert(
         output_dir=tmp_path,
-        chat_slug="42_Some_Chat",
+        chat_slug="274_Some_Chat",
         peer_id="2000000001",
         title="Some Chat",
         type_="group_chat",
         message_count=1,
-        chat_id=42,
+        chat_id=274,
     )
-    result = {"output_dir": str(tmp_path), "chat_slug": "42_Some_Chat"}
+    result = {"output_dir": str(tmp_path), "chat_id": 274}
     path = _save_chat_open_path(result)
     assert path is not None
-    assert path.endswith("/index.html#chat-42_Some_Chat")
+    assert path.endswith("/index.html#chat-274")
 
 
 def test_open_path_drops_anchor_in_all_chats_mode(tmp_path: Path) -> None:
     """"All chats" mode returns a manifest-level result without a
-    `chat_slug` key — Open Output should just open the plain index."""
+    `chat_id` key — Open Output should just open the plain index."""
     from vkdump.tasks.registry import _save_chat_open_path
 
     upsert(
         output_dir=tmp_path,
-        chat_slug="42_Some_Chat",
+        chat_slug="274_Some_Chat",
         peer_id="2000000001",
         title="Some Chat",
         type_="group_chat",
         message_count=1,
-        chat_id=42,
+        chat_id=274,
     )
     result = {"output_dir": str(tmp_path), "mode": "all-chats"}
     path = _save_chat_open_path(result)
@@ -167,4 +175,4 @@ def test_upsert_roundtrip_through_load(tmp_path: Path) -> None:
     manifest = load(tmp_path)
     assert len(manifest.chats) == 1
     html = _render_html(manifest)
-    assert 'id="chat-1_Chat"' in html
+    assert 'id="chat-1"' in html

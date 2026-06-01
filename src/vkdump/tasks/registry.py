@@ -52,9 +52,11 @@ def _save_chat_open_path(result: dict) -> str | None:
     save-chat writes — landing page that lists every exported chat.
 
     When the run rendered a single chat (i.e. not "All chats" mode),
-    append a `#chat-<slug>` fragment so the browser scrolls to and
+    append a `#chat-<id>` fragment so the browser scrolls to and
     highlights the freshly-exported row. The fragment is parsed out
     in ``task_panel._on_open_output`` so the file URI is built cleanly.
+    Using the numeric chats.id (not the slug) keeps the anchor stable
+    if the chat is later renamed and re-exported under a new slug.
     """
     if not isinstance(result, dict):
         return None
@@ -65,9 +67,9 @@ def _save_chat_open_path(result: dict) -> str | None:
     p = Path(out) / "index.html"
     if not p.is_file():
         return None
-    slug = result.get("chat_slug")
-    if slug:
-        return f"{p}#chat-{slug}"
+    chat_id = result.get("chat_id")
+    if chat_id:
+        return f"{p}#chat-{chat_id}"
     return str(p)
 
 

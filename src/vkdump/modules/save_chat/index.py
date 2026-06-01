@@ -176,12 +176,15 @@ def _render_html(manifest: ExportManifest) -> str:
             f'photos ({c.photos_count})</a>'
             if c.photos_page else ""
         )
-        # `id="chat-<slug>"` lets the GUI "Open output" button jump
+        # `id="chat-<chat_id>"` lets the GUI "Open output" button jump
         # straight to the row of the chat that was just exported
-        # (`index.html#chat-<slug>`); the `:target` CSS rule below
+        # (`index.html#chat-<id>`); the `:target` CSS rule below
         # highlights that row so the user spots it without scanning.
+        # Using the numeric DB id (not the slug) keeps the anchor
+        # stable across title renames and ASCII-safe by construction.
+        row_id = f' id="chat-{c.chat_id}"' if c.chat_id else ""
         rows.append(
-            f'<li id="chat-{slug}"><a href="{href}">{title}</a>'
+            f'<li{row_id}><a href="{href}">{title}</a>'
             f'{photos_link}'
             f' <span class="meta">· {c.type} · {c.message_count} messages'
             f' · {html_escape(c.peer_id)} · exported'

@@ -499,12 +499,16 @@ def _render_html(
                     if p.width and p.height else ""
                 )
                 # `<a>` jumps to the message anchor; `<img src>` stays
-                # on the local asset so the thumbnail renders.
+                # on the local asset so the thumbnail renders. The `\n`
+                # after `<img>` puts each thumbnail on its own line in
+                # the source — purely a readability win for anyone
+                # opening the gallery HTML in a text editor; whitespace
+                # between `<img>` and `</a>` has no rendered effect.
                 body_parts.append(
                     '<figure>'
                     f'<a href="{anchor}" title="{tooltip}">'
                     f'<img loading="lazy" decoding="async"'
-                    f' src="{href}" alt="" title="{tooltip}"{size_attrs}>'
+                    f' src="{href}" alt="" title="{tooltip}"{size_attrs}>\n'
                     '</a>'
                     '</figure>'
                 )

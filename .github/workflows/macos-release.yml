@@ -1,0 +1,54 @@
+name: macOS release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Build CLI and GUI
+        run: python build.py
+
+      - name: Stage release artifacts
+        run: |
+          mkdir -p release
+          cp -R ../build/dist/vkdump release/ 2>/dev/null || true
+          if [ -d ../build/dist/vkdump-gui.app ]; then
+            ditto -c -k --sequesterRsrc --keepParent \
+              ../build/dist/vkdump-gui.app release/vkdump-gui.app.zip
+          fi
+          ls -la release/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vkdump-macos
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/**
+          generate_release_notes: true

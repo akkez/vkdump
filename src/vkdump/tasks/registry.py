@@ -50,6 +50,11 @@ def _last_save_chat_chat() -> str | None:
 def _save_chat_open_path(result: dict) -> str | None:
     """Point the GUI's "Open output" button at the top-level index.html
     save-chat writes — landing page that lists every exported chat.
+
+    When the run rendered a single chat (i.e. not "All chats" mode),
+    append a `#chat-<slug>` fragment so the browser scrolls to and
+    highlights the freshly-exported row. The fragment is parsed out
+    in ``task_panel._on_open_output`` so the file URI is built cleanly.
     """
     if not isinstance(result, dict):
         return None
@@ -58,7 +63,12 @@ def _save_chat_open_path(result: dict) -> str | None:
         return None
     from pathlib import Path
     p = Path(out) / "index.html"
-    return str(p) if p.is_file() else None
+    if not p.is_file():
+        return None
+    slug = result.get("chat_slug")
+    if slug:
+        return f"{p}#chat-{slug}"
+    return str(p)
 
 
 def _chat_scope_choices() -> list[tuple[str, str]]:

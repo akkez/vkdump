@@ -8,6 +8,7 @@ in place.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from html import escape as html_escape
@@ -15,6 +16,14 @@ from pathlib import Path
 
 _SIDECAR = "_export.json"
 _INDEX = "index.html"
+
+# Tolerant matcher for both the current `YYYY-MM-DD HH:MM:SS` format and
+# the legacy ISO form (`YYYY-MM-DDTHH:MM:SS+00:00`) sitting in older
+# sidecars — so a re-render of a long-lived output dir still produces
+# clean timestamps without having to migrate the JSON.
+_EXPORTED_AT_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})"
+)
 
 
 @dataclass
@@ -50,7 +59,22 @@ class ExportManifest:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    """UTC timestamp formatted plain — no `T`, no `+00:00` tail. The
+    value is implicitly UTC; carrying the tz suffix in user-facing
+    output was noise without information."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _fmt_exported_at(raw: str) -> str:
+    """Normalise an `exported_at` value for display. Accepts both the
+    current `YYYY-MM-DD HH:MM:SS` and the legacy ISO form, returns the
+    space-separated date+time without timezone."""
+    if not raw:
+        return ""
+    m = _EXPORTED_AT_RE.match(raw)
+    if not m:
+        return raw
+    return f"{m.group(1)} {m.group(2)}"
 
 
 def load(output_dir: Path) -> ExportManifest:
@@ -152,11 +176,16 @@ def _render_html(manifest: ExportManifest) -> str:
             f'photos ({c.photos_count})</a>'
             if c.photos_page else ""
         )
+        # `id="chat-<slug>"` lets the GUI "Open output" button jump
+        # straight to the row of the chat that was just exported
+        # (`index.html#chat-<slug>`); the `:target` CSS rule below
+        # highlights that row so the user spots it without scanning.
         rows.append(
-            f'<li><a href="{href}">{title}</a>'
+            f'<li id="chat-{slug}"><a href="{href}">{title}</a>'
             f'{photos_link}'
             f' <span class="meta">· {c.type} · {c.message_count} messages'
-            f' · {html_escape(c.peer_id)} · exported {html_escape(c.exported_at)}</span></li>'
+            f' · {html_escape(c.peer_id)} · exported'
+            f' {html_escape(_fmt_exported_at(c.exported_at))}</span></li>'
         )
     return (
         "<!doctype html>\n"
@@ -167,6 +196,7 @@ def _render_html(manifest: ExportManifest) -> str:
         "h1{margin:0 0 16px;font-size:20px}"
         "ul{list-style:none;padding:0}"
         "li{padding:8px 0;border-bottom:1px solid #eee}"
+        "li:target{background:#fff3b0;border-left:3px solid #f0a500;padding-left:8px}"
         "a{color:#0a66c2;text-decoration:none}a:hover{text-decoration:underline}"
         ".photos-link{font-size:12px}"
         ".meta{color:#777;font-size:12px}"

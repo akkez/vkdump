@@ -750,7 +750,16 @@ class TaskPanel(QWidget):
             return
         import webbrowser
         from pathlib import Path as _Path
-        webbrowser.open(_Path(self._open_path).resolve().as_uri())
+        from urllib.parse import quote
+        # `result_open_path` may suffix the file path with `#anchor` so
+        # the browser lands on a specific row of the export index.
+        # Split before `as_uri()` because `Path("…#x")` would treat the
+        # fragment as part of the filename and the file wouldn't open.
+        path, _, anchor = self._open_path.partition("#")
+        uri = _Path(path).resolve().as_uri()
+        if anchor:
+            uri = f"{uri}#{quote(anchor, safe='-_.~')}"
+        webbrowser.open(uri)
 
     def _on_failed(self, run_id: int, error: str) -> None:
         self._status.setText(f"failed — run #{run_id}")

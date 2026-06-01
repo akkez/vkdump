@@ -25,6 +25,7 @@ from rich.text import Text
 
 from ..core.db import CancelHandle, connection, set_active_cancel
 from ..tasks.spec import ParamSpec, TaskSpec
+from ._open_url import open_url as _open_url
 from .widgets.aero_progress import AeroProgressGroup
 from .workers import TaskWorker
 
@@ -748,7 +749,6 @@ class TaskPanel(QWidget):
     def _on_open_output(self) -> None:
         if not self._open_path:
             return
-        import webbrowser
         from pathlib import Path as _Path
         from urllib.parse import quote
         # `result_open_path` may suffix the file path with `#anchor` so
@@ -759,7 +759,7 @@ class TaskPanel(QWidget):
         uri = _Path(path).resolve().as_uri()
         if anchor:
             uri = f"{uri}#{quote(anchor, safe='-_.~')}"
-        webbrowser.open(uri)
+        _open_url(uri, want_fragment=bool(anchor))
 
     def _on_failed(self, run_id: int, error: str) -> None:
         self._status.setText(f"failed — run #{run_id}")

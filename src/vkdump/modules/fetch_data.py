@@ -41,7 +41,7 @@ from ..core.db import connection
 from ..core.progress import Cancelled, ProgressReporter, Throttle
 from ..core.rate_limiter import RateLimiter
 from ..core.throughput import Throughput
-from ..core.vk_api import VKApi, VKApiError
+from ..core.vk_api import VKApi, VKApiError, VKApiTimeout
 
 
 _ACTIVE_KEY = "active_account_id"
@@ -50,6 +50,7 @@ _SCAN_CHUNK = 5000
 _MAX_RPS = 3.0
 _RATE_LIMITED_CODE = 6
 _RATE_LIMIT_BACKOFF_S = (2, 3, 5, 7, 10, 15)
+_TIMEOUT_RETRY_S = 2.0
 _THROUGHPUT_TICK_S = 10.0
 _EXECUTE_MAX_CALLS = 25
 
@@ -484,12 +485,22 @@ async def _get_by_id_with_backoff(
     vk: VKApi, limiter: RateLimiter, ids: list[int],
     stop: asyncio.Event, progress: ProgressReporter,
 ) -> list[dict]:
-    """One ``messages.getById`` call, paced by the shared limiter, with
-    fixed-schedule backoff on VK error 6 (Too many requests). Backoff
-    sleeps are wrapped against ``stop`` so a Stop click during a long
-    retry wakes immediately."""
-    backoffs = list(_RATE_LIMIT_BACKOFF_S) + [None]
-    for i, delay in enumerate(backoffs):
+    """One ``messages.getById`` call, paced by the shared limiter.
+
+    Two retry policies share the loop:
+
+    * **Rate-limited (code 6).** Fixed schedule from
+      ``_RATE_LIMIT_BACKOFF_S``; after the last entry is exhausted the
+      VKApiError propagates so the caller (and the orchestrator)
+      surface the failure.
+    * **Request timed out.** Retried indefinitely with a short
+      ``_TIMEOUT_RETRY_S`` delay — a slow VK endpoint shouldn't kill a
+      multi-million-message scrape. ``stop`` interrupts the retry
+      sleep so cancellation stays responsive.
+    """
+    rl_attempt = 0
+    timeout_attempt = 0
+    while True:
         await limiter.acquire()
         if stop.is_set():
             return []
@@ -497,12 +508,30 @@ async def _get_by_id_with_backoff(
             resp = await vk.call(
                 "messages.getById", message_ids=ids, extended=True,
             )
+        except VKApiTimeout:
+            timeout_attempt += 1
+            progress.log(
+                f"VK timeout on messages.getById; retrying"
+                f" (attempt {timeout_attempt})"
+            )
+            logger.warning(
+                "messages.getById timed out; retry {} after {}s",
+                timeout_attempt, _TIMEOUT_RETRY_S,
+            )
+            await _sleep_until_stop(_TIMEOUT_RETRY_S, stop)
+            if stop.is_set():
+                return []
+            continue
         except VKApiError as e:
-            if e.code != _RATE_LIMITED_CODE or delay is None:
+            if e.code != _RATE_LIMITED_CODE:
                 raise
+            if rl_attempt >= len(_RATE_LIMIT_BACKOFF_S):
+                raise
+            delay = _RATE_LIMIT_BACKOFF_S[rl_attempt]
+            rl_attempt += 1
             progress.log(
                 f"VK rate limited (code 6); backing off {delay}s"
-                f" (retry {i + 1}/{len(_RATE_LIMIT_BACKOFF_S)})"
+                f" (retry {rl_attempt}/{len(_RATE_LIMIT_BACKOFF_S)})"
             )
             logger.warning("messages.getById rate limited; sleep {}s", delay)
             await _sleep_until_stop(delay, stop)
@@ -513,7 +542,6 @@ async def _get_by_id_with_backoff(
         if items is None:
             return []
         return [m for m in items if isinstance(m, dict)]
-    raise RuntimeError("unreachable")
 
 
 async def _sleep_until_stop(delay: float, stop: asyncio.Event) -> None:
@@ -543,21 +571,39 @@ async def _execute_get_by_id_with_backoff(
     """
     calls_in = len(batches)
     requested = sum(len(b) for b in batches)
-    backoffs = list(_RATE_LIMIT_BACKOFF_S) + [None]
-    for i, delay in enumerate(backoffs):
-        code = _build_execute_code(batches)
+    rl_attempt = 0
+    timeout_attempt = 0
+    code = _build_execute_code(batches)
+    while True:
         await limiter.acquire()
         if stop.is_set():
             return [], requested
         started = time.monotonic()
         try:
             response, errors = await vk.execute(code)
+        except VKApiTimeout:
+            timeout_attempt += 1
+            progress.log(
+                f"VK timeout on execute; retrying (attempt {timeout_attempt})"
+            )
+            logger.warning(
+                "execute timed out; retry {} after {}s",
+                timeout_attempt, _TIMEOUT_RETRY_S,
+            )
+            await _sleep_until_stop(_TIMEOUT_RETRY_S, stop)
+            if stop.is_set():
+                return [], requested
+            continue
         except VKApiError as e:
-            if e.code != _RATE_LIMITED_CODE or delay is None:
+            if e.code != _RATE_LIMITED_CODE:
                 raise
+            if rl_attempt >= len(_RATE_LIMIT_BACKOFF_S):
+                raise
+            delay = _RATE_LIMIT_BACKOFF_S[rl_attempt]
+            rl_attempt += 1
             progress.log(
                 f"VK rate limited (code 6) on execute; backing off {delay}s"
-                f" (retry {i + 1}/{len(_RATE_LIMIT_BACKOFF_S)})"
+                f" (retry {rl_attempt}/{len(_RATE_LIMIT_BACKOFF_S)})"
             )
             logger.warning("execute rate limited; sleep {}s", delay)
             await _sleep_until_stop(delay, stop)
@@ -567,10 +613,12 @@ async def _execute_get_by_id_with_backoff(
         rate_limited = any(
             int(e.get("error_code") or 0) == _RATE_LIMITED_CODE for e in errors
         )
-        if rate_limited and delay is not None:
+        if rate_limited and rl_attempt < len(_RATE_LIMIT_BACKOFF_S):
+            delay = _RATE_LIMIT_BACKOFF_S[rl_attempt]
+            rl_attempt += 1
             progress.log(
                 f"VK rate limited (code 6) on execute sub-call; backing off {delay}s"
-                f" (retry {i + 1}/{len(_RATE_LIMIT_BACKOFF_S)})"
+                f" (retry {rl_attempt}/{len(_RATE_LIMIT_BACKOFF_S)})"
             )
             logger.warning("execute sub-call rate limited; sleep {}s", delay)
             await _sleep_until_stop(delay, stop)

@@ -34,6 +34,15 @@ class VKApiError(RuntimeError):
             super().__init__(f"VK API error {code}: {message}")
 
 
+class VKApiTimeout(VKApiError):
+    """Raised when a request didn't complete within the client timeout.
+
+    Caller-side retry loops single out this subclass so a slow VK
+    endpoint doesn't kill a multi-million-message scrape — every other
+    VKApiError still bubbles up untouched.
+    """
+
+
 class VKApi:
     def __init__(self, access_token: str, *, timeout: float = 15.0) -> None:
         self._token = access_token
@@ -90,7 +99,7 @@ class VKApi:
                 raw = await resp.read()
                 content_type = resp.headers.get("Content-Type")
         except asyncio.TimeoutError as e:
-            raise VKApiError(None, "request timed out") from e
+            raise VKApiTimeout(None, "request timed out") from e
         except aiohttp.ClientError as e:
             raise VKApiError(None, f"network error: {e}") from e
         try:

@@ -98,8 +98,8 @@ async def _run_async(
     progress: ProgressReporter,
 ) -> dict:
     state = _RunState()
-    limiter = RateLimiter(_MAX_RPS)
-    ticker_stop = asyncio.Event()
+    stop = asyncio.Event()
+    limiter = RateLimiter(_MAX_RPS, stop=stop)
 
     async with VKApi(token) as vk:
         try:
@@ -126,23 +126,27 @@ async def _run_async(
         )
         progress.report(0, eligible, _status_msg(state))
 
-        ticker = asyncio.create_task(_throughput_ticker(state, progress, ticker_stop))
+        bridge = asyncio.create_task(_cancellation_bridge(progress, stop))
+        ticker = asyncio.create_task(_throughput_ticker(state, progress, stop))
         try:
             if strategy == "get-by-id":
                 await _run_get_by_id(
-                    vk, limiter, account_pk, vk_account_id_text, state, progress
+                    vk, limiter, account_pk, vk_account_id_text, state, stop, progress
                 )
             else:
                 await _run_execute(
                     vk, limiter, account_pk, vk_account_id_text,
-                    threads, per_request, state, progress,
+                    threads, per_request, state, stop, progress,
                 )
+            if stop.is_set():
+                raise Cancelled()
         finally:
-            ticker_stop.set()
-            try:
-                await ticker
-            except Exception:  # noqa: BLE001
-                pass
+            stop.set()
+            for t in (bridge, ticker):
+                try:
+                    await t
+                except Exception:  # noqa: BLE001
+                    pass
 
     progress.report(eligible, eligible, "done — " + _status_msg(state))
     avg = state.throughput.averages()
@@ -193,13 +197,19 @@ class _RunState:
 async def _throughput_ticker(
     state: _RunState, progress: ProgressReporter, stop: asyncio.Event
 ) -> None:
-    """Emit msg/s 1m/5m/15m averages every _THROUGHPUT_TICK_S seconds."""
+    """Emit msg/s 1m/5m/15m averages every _THROUGHPUT_TICK_S seconds.
+
+    Wakes immediately when ``stop`` is set so cancellation doesn't have
+    to wait for the next 10 s deadline.
+    """
     while not stop.is_set():
         try:
             await asyncio.wait_for(stop.wait(), timeout=_THROUGHPUT_TICK_S)
             return
         except asyncio.TimeoutError:
             pass
+        if stop.is_set():
+            return
         avg = state.throughput.averages()
         msg = (
             f"throughput msg/s 1m/5m/15m = {avg.format()}"
@@ -209,24 +219,53 @@ async def _throughput_ticker(
         logger.info(msg)
 
 
+async def _cancellation_bridge(
+    progress: ProgressReporter, stop: asyncio.Event
+) -> None:
+    """Mirror the synchronous cancellation token into the asyncio Event
+    every coroutine in this run watches.
+
+    The ProgressReporter protocol only exposes ``check_cancelled()``
+    (raises), so we poll it every 200 ms. As soon as the user clicks
+    Stop the event flips, in-flight ``asyncio.wait_for(stop.wait(), …)``
+    awaits wake instantly and the ticker / limiter / backoff sleeps
+    unblock without having to ride out their full timeout.
+    """
+    while not stop.is_set():
+        try:
+            progress.check_cancelled()
+        except Cancelled:
+            stop.set()
+            return
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=0.2)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def _run_get_by_id(
     vk: VKApi,
     limiter: RateLimiter,
     account_pk: int,
     vk_account_id_text: str,
     state: _RunState,
+    stop: asyncio.Event,
     progress: ProgressReporter,
 ) -> None:
     throttle = Throttle()
     for pending_ids, _chunk_last_id, chunk_skipped in _iter_pending_chunks(
         account_pk, vk_account_id_text
     ):
-        progress.check_cancelled()
+        if stop.is_set():
+            return
         state.skipped += chunk_skipped
         _emit_progress(state, throttle, progress)
         for batch in _split(pending_ids, _BATCH_SIZE):
-            progress.check_cancelled()
-            items = await _get_by_id_with_backoff(vk, limiter, batch, progress)
+            if stop.is_set():
+                return
+            items = await _get_by_id_with_backoff(vk, limiter, batch, stop, progress)
+            if stop.is_set():
+                return
             got_ids = {int(m["id"]) for m in items if isinstance(m.get("id"), int)}
             state.missing += len(batch) - len(got_ids)
             if items:
@@ -244,11 +283,18 @@ async def _run_execute(
     threads: int,
     per_request: int,
     state: _RunState,
+    stop: asyncio.Event,
     progress: ProgressReporter,
 ) -> None:
     """Pack up to ``per_request`` ``messages.getById`` calls per ``execute``
     request and run ``threads`` of them in parallel. The rate limiter
-    enforces the 3 req/s cap regardless of thread count."""
+    enforces the 3 req/s cap regardless of thread count.
+
+    Cancellation: ``stop`` is set by the bridge task as soon as the
+    user clicks Stop. Producer and workers check it at every loop
+    iteration; ``queue.get`` is wrapped in ``wait_for`` so workers
+    don't wedge on an empty queue while shutting down.
+    """
     queue: asyncio.Queue[list[int] | None] = asyncio.Queue(maxsize=threads * 4)
     throttle = Throttle()
 
@@ -257,36 +303,57 @@ async def _run_execute(
             for pending_ids, _chunk_last_id, chunk_skipped in _iter_pending_chunks(
                 account_pk, vk_account_id_text
             ):
-                progress.check_cancelled()
+                if stop.is_set():
+                    return
                 state.skipped += chunk_skipped
                 _emit_progress(state, throttle, progress)
                 for batch in _split(pending_ids, _BATCH_SIZE):
-                    await queue.put(batch)
+                    while not stop.is_set():
+                        try:
+                            await asyncio.wait_for(queue.put(batch), timeout=0.5)
+                            break
+                        except asyncio.TimeoutError:
+                            continue
+                    if stop.is_set():
+                        return
         finally:
-            for _ in range(threads):
-                await queue.put(None)
+            # Wake every worker that's still in `queue.get()` so they can
+            # observe `stop` and exit. put_nowait would race with the
+            # caller's own wait_for(queue.put) — workers already poll
+            # the queue with a 0.5 s timeout, so they don't need a
+            # sentinel to bail out under cancellation.
+            if not stop.is_set():
+                for _ in range(threads):
+                    try:
+                        queue.put_nowait(None)
+                    except asyncio.QueueFull:
+                        return
 
     async def worker() -> None:
-        while True:
-            sub_batches: list[list[int]] = []
-            first = await queue.get()
+        while not stop.is_set():
+            try:
+                first = await asyncio.wait_for(queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
             if first is None:
                 return
-            sub_batches.append(first)
+            sub_batches: list[list[int]] = [first]
             while len(sub_batches) < per_request:
                 try:
                     nxt = queue.get_nowait()
                 except asyncio.QueueEmpty:
                     break
                 if nxt is None:
-                    for _ in range(threads):
-                        await queue.put(None)
+                    queue.put_nowait(None)
                     break
                 sub_batches.append(nxt)
-            progress.check_cancelled()
+            if stop.is_set():
+                return
             items, missing_in_call = await _execute_get_by_id_with_backoff(
-                vk, limiter, sub_batches, progress
+                vk, limiter, sub_batches, stop, progress
             )
+            if stop.is_set():
+                return
             state.missing += missing_in_call
             if items:
                 _persist_batch(account_pk, items)
@@ -296,18 +363,7 @@ async def _run_execute(
 
     workers = [asyncio.create_task(worker()) for _ in range(threads)]
     prod = asyncio.create_task(producer())
-    try:
-        await asyncio.gather(prod, *workers)
-    except BaseException:
-        for t in (prod, *workers):
-            if not t.done():
-                t.cancel()
-        for t in (prod, *workers):
-            try:
-                await t
-            except (Cancelled, asyncio.CancelledError, Exception):
-                pass
-        raise
+    await asyncio.gather(prod, *workers, return_exceptions=False)
 
 
 def _count_eligible_messages(vk_account_id_text: str) -> int:
@@ -413,13 +469,18 @@ def _split(seq: list[int], n: int) -> Iterator[list[int]]:
 
 
 async def _get_by_id_with_backoff(
-    vk: VKApi, limiter: RateLimiter, ids: list[int], progress: ProgressReporter
+    vk: VKApi, limiter: RateLimiter, ids: list[int],
+    stop: asyncio.Event, progress: ProgressReporter,
 ) -> list[dict]:
     """One ``messages.getById`` call, paced by the shared limiter, with
-    fixed-schedule backoff on VK error 6 (Too many requests)."""
+    fixed-schedule backoff on VK error 6 (Too many requests). Backoff
+    sleeps are wrapped against ``stop`` so a Stop click during a long
+    retry wakes immediately."""
     backoffs = list(_RATE_LIMIT_BACKOFF_S) + [None]
     for i, delay in enumerate(backoffs):
         await limiter.acquire()
+        if stop.is_set():
+            return []
         try:
             resp = await vk.call(
                 "messages.getById", message_ids=ids, extended=True,
@@ -432,7 +493,9 @@ async def _get_by_id_with_backoff(
                 f" (retry {i + 1}/{len(_RATE_LIMIT_BACKOFF_S)})"
             )
             logger.warning("messages.getById rate limited; sleep {}s", delay)
-            await asyncio.sleep(delay)
+            await _sleep_until_stop(delay, stop)
+            if stop.is_set():
+                return []
             continue
         items = resp.get("items") if isinstance(resp, dict) else None
         if items is None:
@@ -441,10 +504,19 @@ async def _get_by_id_with_backoff(
     raise RuntimeError("unreachable")
 
 
+async def _sleep_until_stop(delay: float, stop: asyncio.Event) -> None:
+    """Sleep up to ``delay`` seconds, returning early if ``stop`` is set."""
+    try:
+        await asyncio.wait_for(stop.wait(), timeout=delay)
+    except asyncio.TimeoutError:
+        pass
+
+
 async def _execute_get_by_id_with_backoff(
     vk: VKApi,
     limiter: RateLimiter,
     batches: list[list[int]],
+    stop: asyncio.Event,
     progress: ProgressReporter,
 ) -> tuple[list[dict], int]:
     """Pack ``batches`` (≤ 25 sub-batches of ≤ 100 ids each) into one
@@ -463,6 +535,8 @@ async def _execute_get_by_id_with_backoff(
     for i, delay in enumerate(backoffs):
         code = _build_execute_code(batches)
         await limiter.acquire()
+        if stop.is_set():
+            return [], requested
         started = time.monotonic()
         try:
             response, errors = await vk.execute(code)
@@ -474,7 +548,9 @@ async def _execute_get_by_id_with_backoff(
                 f" (retry {i + 1}/{len(_RATE_LIMIT_BACKOFF_S)})"
             )
             logger.warning("execute rate limited; sleep {}s", delay)
-            await asyncio.sleep(delay)
+            await _sleep_until_stop(delay, stop)
+            if stop.is_set():
+                return [], requested
             continue
         rate_limited = any(
             int(e.get("error_code") or 0) == _RATE_LIMITED_CODE for e in errors
@@ -485,7 +561,9 @@ async def _execute_get_by_id_with_backoff(
                 f" (retry {i + 1}/{len(_RATE_LIMIT_BACKOFF_S)})"
             )
             logger.warning("execute sub-call rate limited; sleep {}s", delay)
-            await asyncio.sleep(delay)
+            await _sleep_until_stop(delay, stop)
+            if stop.is_set():
+                return [], requested
             continue
         items, ok_slots, failed_slots = _summarize_execute_response(response, calls_in)
         took_ms = int((time.monotonic() - started) * 1000)

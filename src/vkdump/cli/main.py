@@ -196,6 +196,12 @@ def stats_cmd() -> None:
     _run("stats", {})
 
 
+@app.command("fetch-data")
+def fetch_data_cmd() -> None:
+    """Pull full VK messages (with forwards/replies) via messages.getById."""
+    _run("fetch-data", {})
+
+
 @app.command("save-chat")
 def save_chat_cmd(
     source: Annotated[

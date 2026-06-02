@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QSpinBox,
@@ -504,7 +506,39 @@ class TaskPanel(QWidget):
         this to decide whether to ask the user before quitting."""
         return self._active_worker is not None
 
+    def _ensure_vk_token(self) -> bool:
+        """Return True if the active account has a VK API token, or the
+        user just authorized one via the modal dialog. Return False if
+        the user dismissed the dialog without authorizing — caller must
+        abort the run.
+        """
+        from ..core import app_config as _app_config
+        from .auth_dialog import AuthDialog
+        active = (_app_config.get("active_account_id") or "").strip()
+        has_token = False
+        if active:
+            with connection() as conn:
+                row = conn.execute(
+                    "SELECT vk_access_token FROM accounts"
+                    " WHERE provider='vk' AND vk_id=?",
+                    (active,),
+                ).fetchone()
+            has_token = bool(row and row["vk_access_token"])
+        if has_token:
+            return True
+        dlg = AuthDialog(self)
+        if dlg.exec() != AuthDialog.DialogCode.Accepted:
+            self._status.setText("authorization cancelled")
+            return False
+        # AuthDialog upserts the account and updates active_account_id;
+        # other tabs that key off the account list will refresh on the
+        # next data_changed broadcast.
+        self.data_mutated.emit()
+        return True
+
     def _on_run(self) -> None:
+        if self._task.requires_vk_token and not self._ensure_vk_token():
+            return
         try:
             params = self._collect_params()
         except ValueError as e:
@@ -699,6 +733,16 @@ class TaskPanel(QWidget):
         self._reset_buttons()
         if self._task.mutates_data:
             self.data_mutated.emit()
+        if self._task.result_dialog and result is not None:
+            try:
+                text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+            except Exception:
+                text = str(result)
+            box = QMessageBox(self)
+            box.setWindowTitle(self._task.title)
+            box.setText(text)
+            box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            box.exec()
 
     def refresh_choice_inputs(self) -> None:
         """Re-run every `choice` param's `choices_provider` and rebuild

@@ -44,3 +44,11 @@ class TaskSpec:
     # read-only tasks (stats) so finishing them doesn't trigger a
     # repaint cascade across every tab.
     mutates_data: bool = True
+    # If True, the GUI pops the run's `result` (assumed JSON-serialisable)
+    # into a message box on success. Used by probing tasks that just need
+    # to show a one-shot response to the user.
+    result_dialog: bool = False
+    # If True, the GUI checks the active account has a VK API token before
+    # starting; if not, opens the auth dialog first and only proceeds once
+    # the user has authorized (or cancels the run).
+    requires_vk_token: bool = False

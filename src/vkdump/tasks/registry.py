@@ -1,6 +1,6 @@
 from typing import Callable
 
-from ..modules import enrich, parse_dump, save_chat, stats
+from ..modules import enrich, fetch_data, parse_dump, save_chat, stats
 from .spec import ParamSpec, TaskSpec
 
 
@@ -145,6 +145,14 @@ TASKS: list[TaskSpec] = [
             ),
         ],
         run=parse_dump.run,
+    ),
+    TaskSpec(
+        name="fetch-data",
+        title="Fetch data",
+        description="Pull full VK message payloads (with forwards/reply chains) via messages.getById for every locally-parsed message that contains forwards. Idempotent — already-cached ids count toward the progress bar so a re-run resumes at the % it left off.",
+        params=[],
+        run=fetch_data.run,
+        requires_vk_token=True,
     ),
     TaskSpec(
         name="enrich-media",

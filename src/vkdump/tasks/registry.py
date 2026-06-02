@@ -149,8 +149,49 @@ TASKS: list[TaskSpec] = [
     TaskSpec(
         name="fetch-data",
         title="Fetch data",
-        description="Pull full VK message payloads (with forwards/reply chains) via messages.getById for every locally-parsed message that contains forwards. Idempotent — already-cached ids count toward the progress bar so a re-run resumes at the % it left off.",
-        params=[],
+        description=(
+            "Pull full VK message payloads (forwards, reply chains, full attachment"
+            " metadata) for every locally-parsed message with at least one attachment"
+            " that isn't a non-vk-CDN photo. Idempotent — already-cached ids count"
+            " toward the progress bar so a re-run resumes at the % it left off."
+        ),
+        params=[
+            ParamSpec(
+                name="strategy",
+                type="choice",
+                label="Strategy",
+                help=(
+                    "get-by-id: one messages.getById per batch (sequential)."
+                    " execute: pack up to 25 sub-calls into one execute request and"
+                    " fan out across the configured thread count."
+                ),
+                required=False,
+                default="get-by-id",
+                choices=[
+                    ("get-by-id", "1 — messages.getById"),
+                    ("execute", "2 — execute (batched)"),
+                ],
+                default_provider=_remember("fetch_data.last_strategy"),
+            ),
+            ParamSpec(
+                name="threads",
+                type="int",
+                label="Parallel threads (execute only)",
+                help="Concurrent execute requests; ignored by get-by-id.",
+                required=False,
+                default=4,
+                default_provider=_remember("fetch_data.last_threads"),
+            ),
+            ParamSpec(
+                name="per_request",
+                type="int",
+                label="Calls per execute (1..25)",
+                help="messages.getById sub-calls packed into one execute request.",
+                required=False,
+                default=25,
+                default_provider=_remember("fetch_data.last_per_request"),
+            ),
+        ],
         run=fetch_data.run,
         requires_vk_token=True,
     ),

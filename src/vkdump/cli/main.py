@@ -197,9 +197,36 @@ def stats_cmd() -> None:
 
 
 @app.command("fetch-data")
-def fetch_data_cmd() -> None:
-    """Pull full VK messages (with forwards/replies) via messages.getById."""
-    _run("fetch-data", {})
+def fetch_data_cmd(
+    strategy: Annotated[
+        str,
+        typer.Option(
+            "--strategy", "-s",
+            help="`get-by-id` (sequential) or `execute` (batched, parallel).",
+        ),
+    ] = "get-by-id",
+    threads: Annotated[
+        int,
+        typer.Option(
+            "--threads", "-t",
+            help="Parallel execute requests (execute strategy only).",
+        ),
+    ] = 4,
+    per_request: Annotated[
+        int,
+        typer.Option(
+            "--per-request", "-p",
+            min=1, max=25,
+            help="messages.getById sub-calls packed into one execute request.",
+        ),
+    ] = 25,
+) -> None:
+    """Pull full VK messages for attachment-bearing rows worth scraping."""
+    _run("fetch-data", {
+        "strategy": strategy,
+        "threads": threads,
+        "per_request": per_request,
+    })
 
 
 @app.command("save-chat")

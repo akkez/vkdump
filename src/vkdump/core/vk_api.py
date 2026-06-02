@@ -94,6 +94,30 @@ class VKApi:
             return payload["response"]
         return payload
 
+    async def execute(self, code: str) -> tuple[Any, list[dict]]:
+        """Run a VKScript snippet via the ``execute`` method.
+
+        ``code`` is JavaScript-flavoured VKScript that can issue up to
+        25 sub-calls via ``API.method.name({...})`` and must end in a
+        ``return <value>;`` statement. Returns ``(response, errors)``:
+
+        * ``response`` — VK's deserialized ``response`` array (with
+          ``false`` in slots whose sub-call failed).
+        * ``errors`` — the ``execute_errors`` list (one entry per failed
+          sub-call, with ``error_code`` / ``error_msg`` / ``method``).
+
+        Top-level errors (bad token, malformed code) still raise
+        :class:`VKApiError`.
+        """
+        payload = await self.call_raw("execute", code=code)
+        if "error" in payload:
+            err = payload["error"] or {}
+            raise VKApiError(err.get("error_code"), err.get("error_msg") or "unknown")
+        errors = payload.get("execute_errors") or []
+        if not isinstance(errors, list):
+            errors = []
+        return payload.get("response"), [e for e in errors if isinstance(e, dict)]
+
     async def users_get(
         self,
         user_ids: list[int | str] | None = None,

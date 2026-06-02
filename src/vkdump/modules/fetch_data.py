@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Iterator
 
 from loguru import logger
@@ -452,13 +453,17 @@ async def _execute_get_by_id_with_backoff(
     Sub-calls that VK reports under ``execute_errors`` with code 6
     trigger a backoff and retry of the whole execute. Other per-sub
     errors are counted toward ``missing`` along with ids that simply
-    weren't returned.
+    weren't returned. Every successful round-trip emits a one-line
+    summary covering call count, ids in/out, per-sub-batch ok/failed
+    split and elapsed wall time.
     """
+    calls_in = len(batches)
     requested = sum(len(b) for b in batches)
     backoffs = list(_RATE_LIMIT_BACKOFF_S) + [None]
     for i, delay in enumerate(backoffs):
         code = _build_execute_code(batches)
         await limiter.acquire()
+        started = time.monotonic()
         try:
             response, errors = await vk.execute(code)
         except VKApiError as e:
@@ -482,7 +487,17 @@ async def _execute_get_by_id_with_backoff(
             logger.warning("execute sub-call rate limited; sleep {}s", delay)
             await asyncio.sleep(delay)
             continue
-        items = _flatten_execute_response(response)
+        items, ok_slots, failed_slots = _summarize_execute_response(response, calls_in)
+        took_ms = int((time.monotonic() - started) * 1000)
+        line = (
+            f"responded execute(calls_in={calls_in},"
+            f" message_ids_in_req_total={requested},"
+            f" response_msgs_total={len(items)},"
+            f" took {took_ms} msec,"
+            f" batch_within execute: ok {ok_slots}, failed {failed_slots})"
+        )
+        progress.log(line)
+        logger.info(line)
         return items, max(0, requested - len(items))
     raise RuntimeError("unreachable")
 
@@ -503,25 +518,36 @@ def _build_execute_code(batches: list[list[int]]) -> str:
     return "return [" + ",".join(calls) + "];"
 
 
-def _flatten_execute_response(response: object) -> list[dict]:
-    """Concatenate the ``items`` arrays from each sub-call response.
+def _summarize_execute_response(
+    response: object, calls_in: int
+) -> tuple[list[dict], int, int]:
+    """Flatten the ``execute`` payload and count per-slot success.
 
-    A failed sub-call shows up as ``False`` (or missing ``items``) and
-    contributes nothing — the caller treats the gap as ``missing``.
+    Returns ``(items, ok_slots, failed_slots)``:
+
+    * ``items`` — concatenated messages.getById ``items`` from every
+      slot that came back as a dict with a list ``items`` field.
+    * ``ok_slots`` — number of sub-batches that produced a usable
+      response (any dict-shaped slot, even if its ``items`` list is
+      empty — VK returns ``{"count":0,"items":[]}`` when *none* of the
+      requested ids exist, and that's still a successful round-trip).
+    * ``failed_slots`` — sub-batches reported as ``False`` (the slot
+      sentinel for a sub-call error) plus any slots missing from a
+      truncated response. Sums with ``ok_slots`` to ``calls_in``.
     """
-    if not isinstance(response, list):
-        return []
-    out: list[dict] = []
-    for slot in response:
-        if not isinstance(slot, dict):
-            continue
-        items = slot.get("items")
-        if not isinstance(items, list):
-            continue
-        for m in items:
-            if isinstance(m, dict):
-                out.append(m)
-    return out
+    items: list[dict] = []
+    ok = 0
+    if isinstance(response, list):
+        for slot in response:
+            if isinstance(slot, dict):
+                ok += 1
+                slot_items = slot.get("items")
+                if isinstance(slot_items, list):
+                    for m in slot_items:
+                        if isinstance(m, dict):
+                            items.append(m)
+    failed = max(0, calls_in - ok)
+    return items, ok, failed
 
 
 def _persist_batch(account_pk: int, items: list[dict]) -> None:

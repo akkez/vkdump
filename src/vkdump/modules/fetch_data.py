@@ -363,7 +363,19 @@ async def _run_execute(
 
     workers = [asyncio.create_task(worker()) for _ in range(threads)]
     prod = asyncio.create_task(producer())
-    await asyncio.gather(prod, *workers, return_exceptions=False)
+    try:
+        await asyncio.gather(prod, *workers)
+    except BaseException:
+        # One task raised (cancellation, network, decode failure…) —
+        # signal everyone else via `stop`, drain them, then re-raise
+        # so the original exception reaches the orchestrator.
+        stop.set()
+        for t in (prod, *workers):
+            try:
+                await t
+            except BaseException:  # noqa: BLE001
+                pass
+        raise
 
 
 def _count_eligible_messages(vk_account_id_text: str) -> int:

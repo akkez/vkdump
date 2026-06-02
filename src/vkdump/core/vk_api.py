@@ -9,11 +9,13 @@ One client owns one aiohttp.ClientSession — open with
 from __future__ import annotations
 
 import asyncio
+import json
 import ssl
 from typing import Any
 
 import aiohttp
 import certifi
+from loguru import logger
 
 
 API_BASE = "https://api.vk.com/method"
@@ -60,7 +62,16 @@ class VKApi:
     async def call_raw(self, method: str, **params: Any) -> dict:
         """POST to ``method`` and return VK's full JSON payload as-is
         (including ``error`` blocks). Transport failures still raise
-        :class:`VKApiError`."""
+        :class:`VKApiError`.
+
+        Responses are read as raw bytes and decoded manually so a
+        non-UTF-8 byte (occasionally seen in VK execute payloads when
+        a malformed message slips into the response) produces a
+        diagnosable error: the failing request body, the response
+        encoding header, and the surrounding bytes are dumped to the
+        log instead of the bare ``UnicodeDecodeError`` aiohttp would
+        raise from inside ``resp.json``.
+        """
         body: dict[str, Any] = {
             "access_token": self._token,
             "v": API_VERSION,
@@ -76,11 +87,30 @@ class VKApi:
                 body[k] = v
         try:
             async with self.session.post(f"{API_BASE}/{method}", data=body) as resp:
-                payload = await resp.json(content_type=None)
+                raw = await resp.read()
+                content_type = resp.headers.get("Content-Type")
         except asyncio.TimeoutError as e:
             raise VKApiError(None, "request timed out") from e
         except aiohttp.ClientError as e:
             raise VKApiError(None, f"network error: {e}") from e
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as e:
+            _dump_decode_failure(method, body, raw, content_type, e)
+            raise VKApiError(
+                None,
+                f"response decode failed at byte {e.start}: {e.reason}"
+                f" (method={method}, {len(raw)} bytes, content-type={content_type!r})",
+            ) from e
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as e:
+            _dump_json_failure(method, body, text, e)
+            raise VKApiError(
+                None,
+                f"response JSON parse failed: {e.msg} at line {e.lineno} col {e.colno}"
+                f" (method={method}, {len(text)} chars)",
+            ) from e
         if not isinstance(payload, dict):
             return {"response": payload}
         return payload
@@ -137,3 +167,67 @@ class VKApi:
             ct = resp.headers.get("Content-Type")
             data = await resp.read()
         return data, ct
+
+
+def _redact_body(body: dict[str, Any]) -> dict[str, Any]:
+    """Drop the access_token so log dumps are safe to share."""
+    return {k: v for k, v in body.items() if k != "access_token"} | {
+        "access_token": "<redacted>" if "access_token" in body else None
+    }
+
+
+def _dump_decode_failure(
+    method: str, body: dict[str, Any], raw: bytes,
+    content_type: str | None, err: UnicodeDecodeError,
+) -> None:
+    """Log enough context to reproduce a non-UTF-8 VK response.
+
+    Includes the request method + params, the response content-type
+    header, the byte offset of the failure, a small hex window around
+    that offset, and a UTF-8-with-replacement view of the surrounding
+    text. The full body is also written so the maintainer can replay
+    the exact request — VK occasionally returns garbled payloads for
+    specific message ids and the only way to repro is to send the
+    same params again.
+    """
+    start, end = err.start, err.end
+    window = 80
+    around_lo = max(0, start - window)
+    around_hi = min(len(raw), end + window)
+    hex_window = raw[around_lo:around_hi].hex(" ")
+    text_window = raw[around_lo:around_hi].decode("utf-8", errors="replace")
+    safe_body = _redact_body(body)
+    body_preview = json.dumps(safe_body, ensure_ascii=False)
+    if len(body_preview) > 2000:
+        body_preview = body_preview[:2000] + f"…[+{len(body_preview)-2000}ch]"
+    logger.error(
+        "VK API response decode failed | method={} | content-type={!r}"
+        " | total_bytes={} | bad_byte_offset={} | reason={}\n"
+        "request body (token redacted): {}\n"
+        "bytes around offset [{}:{}] (hex): {}\n"
+        "bytes around offset (utf-8 w/ replacement): {!r}",
+        method, content_type, len(raw), start, err.reason,
+        body_preview, around_lo, around_hi, hex_window, text_window,
+    )
+
+
+def _dump_json_failure(
+    method: str, body: dict[str, Any], text: str, err: json.JSONDecodeError,
+) -> None:
+    safe_body = _redact_body(body)
+    body_preview = json.dumps(safe_body, ensure_ascii=False)
+    if len(body_preview) > 2000:
+        body_preview = body_preview[:2000] + f"…[+{len(body_preview)-2000}ch]"
+    window = 200
+    lo = max(0, err.pos - window)
+    hi = min(len(text), err.pos + window)
+    logger.error(
+        "VK API JSON parse failed | method={} | total_chars={}"
+        " | offset={} (line {} col {}) | reason={}\n"
+        "request body (token redacted): {}\n"
+        "text around offset [{}:{}]: {!r}",
+        method, len(text), err.pos, err.lineno, err.colno, err.msg,
+        body_preview, lo, hi, text[lo:hi],
+    )
+
+

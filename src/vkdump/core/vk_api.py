@@ -96,12 +96,21 @@ class VKApi:
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError as e:
+            # VK occasionally emits a 4-byte sequence whose codepoint
+            # is past U+10FFFF (Python's strict UTF-8 decoder rejects
+            # it as "invalid continuation byte"); observed in
+            # reply_message.text fields where the upstream chat
+            # contained binary garbage. Losing one user's bad byte
+            # shouldn't kill a multi-million-message scrape — dump
+            # the surrounding context so the maintainer can repro,
+            # then re-decode with U+FFFD replacement and keep going.
             _dump_decode_failure(method, body, raw, content_type, e)
-            raise VKApiError(
-                None,
-                f"response decode failed at byte {e.start}: {e.reason}"
-                f" (method={method}, {len(raw)} bytes, content-type={content_type!r})",
-            ) from e
+            text = raw.decode("utf-8", errors="replace")
+            logger.warning(
+                "VK API: salvaged {} bytes for method={} with U+FFFD replacement"
+                " (first bad byte at offset {}, reason={!r})",
+                len(raw), method, e.start, e.reason,
+            )
         try:
             payload = json.loads(text)
         except json.JSONDecodeError as e:

@@ -113,25 +113,27 @@ async def _run_async(
             progress.log(f"Authorized as {label} (id{u.get('id')})")
             logger.info("fetch-data: authorized as {} (id{})", label, u.get("id"))
 
-        max_id = _max_message_id(vk_account_id_text)
-        if max_id == 0:
-            progress.log("No messages in DB for the active account.")
-            return state.summary(max_id)
+        progress.report(0, 1, "pre-scan: counting eligible messages…")
+        eligible = _count_eligible_messages(vk_account_id_text)
+        state.eligible_total = eligible
+        if eligible == 0:
+            progress.log("No eligible messages for the active account.")
+            return state.summary()
         progress.log(
-            f"strategy={strategy}"
+            f"pre-scan: {eligible} eligible messages — strategy={strategy}"
             + (f" threads={threads} per_request={per_request}" if strategy == "execute" else "")
         )
-        progress.report(0, max_id, "scanning…")
+        progress.report(0, eligible, _status_msg(state))
 
         ticker = asyncio.create_task(_throughput_ticker(state, progress, ticker_stop))
         try:
             if strategy == "get-by-id":
                 await _run_get_by_id(
-                    vk, limiter, account_pk, vk_account_id_text, max_id, state, progress
+                    vk, limiter, account_pk, vk_account_id_text, state, progress
                 )
             else:
                 await _run_execute(
-                    vk, limiter, account_pk, vk_account_id_text, max_id,
+                    vk, limiter, account_pk, vk_account_id_text,
                     threads, per_request, state, progress,
                 )
         finally:
@@ -141,20 +143,33 @@ async def _run_async(
             except Exception:  # noqa: BLE001
                 pass
 
-    progress.report(
-        max_id, max_id,
-        f"done — fetched={state.fetched} skipped={state.skipped} missing={state.missing}",
-    )
+    progress.report(eligible, eligible, "done — " + _status_msg(state))
     avg = state.throughput.averages()
     summary = (
-        f"fetch-data done: strategy={strategy} fetched={state.fetched}"
-        f" skipped={state.skipped} missing={state.missing}"
-        f" scanned_up_to_id={state.last_id} max_id={max_id}"
+        f"fetch-data done: strategy={strategy} eligible={eligible}"
+        f" fetched={state.fetched} skipped={state.skipped} missing={state.missing}"
         f" msg/s 1m/5m/15m = {avg.format()}"
     )
     progress.log(summary)
     logger.info(summary)
-    return state.summary(max_id)
+    return state.summary()
+
+
+def _status_msg(state: "_RunState") -> str:
+    return (
+        f"fetched={state.fetched} skipped={state.skipped}"
+        f" missing={state.missing}"
+    )
+
+
+def _emit_progress(
+    state: "_RunState", throttle: Throttle, progress: ProgressReporter,
+    *, force: bool = False,
+) -> None:
+    done = state.fetched + state.skipped
+    total = state.eligible_total or max(done, 1)
+    if force or throttle(done, total):
+        progress.report(done, total, _status_msg(state))
 
 
 class _RunState:
@@ -162,15 +177,15 @@ class _RunState:
         self.fetched = 0
         self.missing = 0
         self.skipped = 0
-        self.last_id = 0
+        self.eligible_total = 0
         self.throughput = Throughput()
 
-    def summary(self, max_id: int) -> dict:
+    def summary(self) -> dict:
         return {
+            "eligible": self.eligible_total,
             "fetched": self.fetched,
             "missing": self.missing,
             "skipped": self.skipped,
-            "max_id": max_id,
         }
 
 
@@ -198,21 +213,16 @@ async def _run_get_by_id(
     limiter: RateLimiter,
     account_pk: int,
     vk_account_id_text: str,
-    max_id: int,
     state: _RunState,
     progress: ProgressReporter,
 ) -> None:
     throttle = Throttle()
-    for pending_ids, chunk_last_id, chunk_skipped in _iter_pending_chunks(
+    for pending_ids, _chunk_last_id, chunk_skipped in _iter_pending_chunks(
         account_pk, vk_account_id_text
     ):
         progress.check_cancelled()
         state.skipped += chunk_skipped
-        state.last_id = chunk_last_id
-        progress.report(
-            state.last_id, max_id,
-            f"fetched={state.fetched} skipped={state.skipped} missing={state.missing}",
-        )
+        _emit_progress(state, throttle, progress)
         for batch in _split(pending_ids, _BATCH_SIZE):
             progress.check_cancelled()
             items = await _get_by_id_with_backoff(vk, limiter, batch, progress)
@@ -222,11 +232,7 @@ async def _run_get_by_id(
                 _persist_batch(account_pk, items)
                 state.fetched += len(items)
                 state.throughput.add(len(items))
-            if throttle(state.last_id, max_id):
-                progress.report(
-                    state.last_id, max_id,
-                    f"fetched={state.fetched} skipped={state.skipped} missing={state.missing}",
-                )
+            _emit_progress(state, throttle, progress)
 
 
 async def _run_execute(
@@ -234,7 +240,6 @@ async def _run_execute(
     limiter: RateLimiter,
     account_pk: int,
     vk_account_id_text: str,
-    max_id: int,
     threads: int,
     per_request: int,
     state: _RunState,
@@ -248,17 +253,12 @@ async def _run_execute(
 
     async def producer() -> None:
         try:
-            for pending_ids, chunk_last_id, chunk_skipped in _iter_pending_chunks(
+            for pending_ids, _chunk_last_id, chunk_skipped in _iter_pending_chunks(
                 account_pk, vk_account_id_text
             ):
                 progress.check_cancelled()
                 state.skipped += chunk_skipped
-                state.last_id = chunk_last_id
-                if throttle(state.last_id, max_id):
-                    progress.report(
-                        state.last_id, max_id,
-                        f"fetched={state.fetched} skipped={state.skipped} missing={state.missing}",
-                    )
+                _emit_progress(state, throttle, progress)
                 for batch in _split(pending_ids, _BATCH_SIZE):
                     await queue.put(batch)
         finally:
@@ -291,6 +291,7 @@ async def _run_execute(
                 _persist_batch(account_pk, items)
                 state.fetched += len(items)
                 state.throughput.add(len(items))
+            _emit_progress(state, throttle, progress)
 
     workers = [asyncio.create_task(worker()) for _ in range(threads)]
     prod = asyncio.create_task(producer())
@@ -308,14 +309,36 @@ async def _run_execute(
         raise
 
 
-def _max_message_id(vk_account_id_text: str) -> int:
+def _count_eligible_messages(vk_account_id_text: str) -> int:
+    """One-shot COUNT(*) of scrapeworthy messages for the active account.
+
+    Same predicate as :func:`_iter_pending_chunks` so the progress-bar
+    denominator and the actual scan stay in lockstep. Measured at
+    ~2.5 s on a 1.3M-attached-message DB; runs once at task start.
+    """
     with connection() as conn:
         row = conn.execute(
-            "SELECT COALESCE(MAX(id), 0) AS m FROM messages"
-            " WHERE provider='vk' AND account_id=? AND attachment_count > 0",
+            """
+            SELECT COUNT(*) AS n
+              FROM messages m
+             WHERE m.provider='vk'
+               AND m.account_id=?
+               AND m.attachment_count > 0
+               AND EXISTS (
+                 SELECT 1 FROM attachments a
+                  WHERE a.message_id = m.id
+                    AND NOT (
+                          a.kind = 'photo'
+                      AND a.url IS NOT NULL
+                      AND a.url != ''
+                      AND a.url NOT LIKE 'http://vk.com/%'
+                      AND a.url NOT LIKE 'https://vk.com/%'
+                    )
+               )
+            """,
             (vk_account_id_text,),
         ).fetchone()
-    return int(row["m"]) if row else 0
+    return int(row["n"]) if row else 0
 
 
 def _iter_pending_chunks(

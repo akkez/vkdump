@@ -487,16 +487,20 @@ async def _get_by_id_with_backoff(
 ) -> list[dict]:
     """One ``messages.getById`` call, paced by the shared limiter.
 
-    Two retry policies share the loop:
+    Two indefinite retry policies share the loop:
 
-    * **Rate-limited (code 6).** Fixed schedule from
-      ``_RATE_LIMIT_BACKOFF_S``; after the last entry is exhausted the
-      VKApiError propagates so the caller (and the orchestrator)
-      surface the failure.
-    * **Request timed out.** Retried indefinitely with a short
-      ``_TIMEOUT_RETRY_S`` delay — a slow VK endpoint shouldn't kill a
-      multi-million-message scrape. ``stop`` interrupts the retry
-      sleep so cancellation stays responsive.
+    * **Rate-limited (code 6).** Escalates through
+      ``_RATE_LIMIT_BACKOFF_S`` then stays on the last entry (15 s)
+      forever — VK occasionally throttles for minutes on a hot account
+      and there's nothing to do but wait. Per the maintainer: rate
+      limits aren't a fatal condition, they're a pacing problem.
+    * **Request timed out.** Retried with the short ``_TIMEOUT_RETRY_S``
+      delay so a slow upstream doesn't kill a multi-million-message
+      scrape.
+
+    Other ``VKApiError`` codes (bad token, permission denied, malformed
+    request) still propagate — there's no per-batch downgrade path
+    below this layer.
     """
     rl_attempt = 0
     timeout_attempt = 0
@@ -525,13 +529,11 @@ async def _get_by_id_with_backoff(
         except VKApiError as e:
             if e.code != _RATE_LIMITED_CODE:
                 raise
-            if rl_attempt >= len(_RATE_LIMIT_BACKOFF_S):
-                raise
-            delay = _RATE_LIMIT_BACKOFF_S[rl_attempt]
+            delay = _rate_limit_delay(rl_attempt)
             rl_attempt += 1
             progress.log(
                 f"VK rate limited (code 6); backing off {delay}s"
-                f" (retry {rl_attempt}/{len(_RATE_LIMIT_BACKOFF_S)})"
+                f" (attempt {rl_attempt})"
             )
             logger.warning("messages.getById rate limited; sleep {}s", delay)
             await _sleep_until_stop(delay, stop)
@@ -542,6 +544,14 @@ async def _get_by_id_with_backoff(
         if items is None:
             return []
         return [m for m in items if isinstance(m, dict)]
+
+
+def _rate_limit_delay(attempt: int) -> int:
+    """Pick the next backoff delay from the fixed schedule, clamped at
+    the last entry so retries stay capped at 15 s rather than growing
+    unboundedly or wrapping back to the small delays."""
+    idx = min(attempt, len(_RATE_LIMIT_BACKOFF_S) - 1)
+    return _RATE_LIMIT_BACKOFF_S[idx]
 
 
 async def _sleep_until_stop(delay: float, stop: asyncio.Event) -> None:
@@ -595,30 +605,43 @@ async def _execute_get_by_id_with_backoff(
                 return [], requested
             continue
         except VKApiError as e:
-            if e.code != _RATE_LIMITED_CODE:
-                raise
-            if rl_attempt >= len(_RATE_LIMIT_BACKOFF_S):
-                raise
-            delay = _RATE_LIMIT_BACKOFF_S[rl_attempt]
-            rl_attempt += 1
+            if e.code == _RATE_LIMITED_CODE:
+                delay = _rate_limit_delay(rl_attempt)
+                rl_attempt += 1
+                progress.log(
+                    f"VK rate limited (code 6) on execute; backing off {delay}s"
+                    f" (attempt {rl_attempt})"
+                )
+                logger.warning("execute rate limited; sleep {}s", delay)
+                await _sleep_until_stop(delay, stop)
+                if stop.is_set():
+                    return [], requested
+                continue
+            # Any other top-level execute failure (oversized response —
+            # code 13, JSON parse, transient transport, …) means the
+            # whole batched call is unusable. Downgrade to running each
+            # sub-batch as a standalone messages.getById so one ugly
+            # batch doesn't kill the worker.
             progress.log(
-                f"VK rate limited (code 6) on execute; backing off {delay}s"
-                f" (retry {rl_attempt}/{len(_RATE_LIMIT_BACKOFF_S)})"
+                f"execute hard error (code={e.code} msg={e.message});"
+                f" downgrading to {calls_in} sequential getById calls"
             )
-            logger.warning("execute rate limited; sleep {}s", delay)
-            await _sleep_until_stop(delay, stop)
-            if stop.is_set():
-                return [], requested
-            continue
+            logger.warning(
+                "execute hard error code={} msg={}; downgrading to {} per-batch"
+                " getById calls", e.code, e.message, calls_in,
+            )
+            return await _fallback_to_per_batch(
+                vk, limiter, batches, stop, progress
+            )
         rate_limited = any(
             int(e.get("error_code") or 0) == _RATE_LIMITED_CODE for e in errors
         )
-        if rate_limited and rl_attempt < len(_RATE_LIMIT_BACKOFF_S):
-            delay = _RATE_LIMIT_BACKOFF_S[rl_attempt]
+        if rate_limited:
+            delay = _rate_limit_delay(rl_attempt)
             rl_attempt += 1
             progress.log(
                 f"VK rate limited (code 6) on execute sub-call; backing off {delay}s"
-                f" (retry {rl_attempt}/{len(_RATE_LIMIT_BACKOFF_S)})"
+                f" (attempt {rl_attempt})"
             )
             logger.warning("execute sub-call rate limited; sleep {}s", delay)
             await _sleep_until_stop(delay, stop)
@@ -637,7 +660,42 @@ async def _execute_get_by_id_with_backoff(
         progress.log(line)
         logger.info(line)
         return items, max(0, requested - len(items))
-    raise RuntimeError("unreachable")
+
+
+async def _fallback_to_per_batch(
+    vk: VKApi,
+    limiter: RateLimiter,
+    batches: list[list[int]],
+    stop: asyncio.Event,
+    progress: ProgressReporter,
+) -> tuple[list[dict], int]:
+    """Replay each sub-batch as a standalone ``messages.getById`` call.
+
+    Triggered when an ``execute`` request fails non-recoverably
+    (oversized response, JSON parse, transient transport). Per-batch
+    requests are an order of magnitude smaller than the bundled
+    execute payload, so the same set of ids almost always survives
+    the smaller call shape — and on the rare batch that still fails,
+    only those 100 ids are lost instead of the full 2500.
+    """
+    requested = sum(len(b) for b in batches)
+    items: list[dict] = []
+    started = time.monotonic()
+    for batch in batches:
+        if stop.is_set():
+            break
+        sub = await _get_by_id_with_backoff(vk, limiter, batch, stop, progress)
+        items.extend(sub)
+    took_ms = int((time.monotonic() - started) * 1000)
+    line = (
+        f"fallback getById sequence(calls={len(batches)},"
+        f" message_ids_in_req_total={requested},"
+        f" response_msgs_total={len(items)},"
+        f" took {took_ms} msec)"
+    )
+    progress.log(line)
+    logger.info(line)
+    return items, max(0, requested - len(items))
 
 
 def _build_execute_code(batches: list[list[int]]) -> str:

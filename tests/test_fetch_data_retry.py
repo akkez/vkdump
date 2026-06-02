@@ -104,24 +104,45 @@ def test_get_by_id_retries_timeouts_indefinitely_then_succeeds() -> None:
     assert "attempt 3" in timeout_lines[2]
 
 
-def test_get_by_id_rate_limit_schedule_unchanged() -> None:
-    """Six rate-limit errors should exhaust the fixed schedule and the
-    seventh propagates — timeouts must not have widened the policy."""
+def test_get_by_id_rate_limit_retries_past_schedule_exhaustion() -> None:
+    """Rate-limit retries are indefinite — the fixed schedule
+    (`_RATE_LIMIT_BACKOFF_S`) only controls the delay between attempts,
+    never the upper bound on retry count. After the schedule is
+    exhausted the loop must keep going with the final (15 s) delay."""
     schedule = fetch_data._RATE_LIMIT_BACKOFF_S
+    n_rl = len(schedule) + 4  # exhaust the schedule, then four more rl hits
     rate_limited = VKApiError(6, "Too many requests per second")
-    vk = _FakeVK([rate_limited] * (len(schedule) + 1))
+    good = {"items": [{"id": 1}]}
+    vk = _FakeVK([rate_limited] * n_rl + [good])
     limiter = RateLimiter(100.0)
     stop = asyncio.Event()
     progress = _LogReporter()
 
+    items = _run(fetch_data._get_by_id_with_backoff(
+        vk, limiter, [1], stop, progress,
+    ))
+    assert [m["id"] for m in items] == [1]
+    assert len(vk.calls) == n_rl + 1
+    rl_lines = [ln for ln in progress.lines if "rate limited" in ln]
+    assert len(rl_lines) == n_rl
+    # First few attempts walk the schedule, later ones clamp to the last entry.
+    assert f"backing off {schedule[0]}s" in rl_lines[0]
+    assert f"backing off {schedule[-1]}s" in rl_lines[-1]
+
+
+def test_get_by_id_non_rate_limit_error_still_propagates() -> None:
+    """Bad-token / permission / malformed-request errors aren't retryable
+    at this layer — they must bubble out so the orchestrator can mark
+    the run failed instead of looping forever on a doomed call."""
+    vk = _FakeVK([VKApiError(5, "User authorization failed")])
+    limiter = RateLimiter(100.0)
+    stop = asyncio.Event()
+    progress = _LogReporter()
     with pytest.raises(VKApiError) as exc:
         _run(fetch_data._get_by_id_with_backoff(
             vk, limiter, [1], stop, progress,
         ))
-    assert exc.value.code == 6
-    # One call per schedule entry, plus the one that raised after
-    # the schedule ran out — so len(schedule)+1 total.
-    assert len(vk.calls) == len(schedule) + 1
+    assert exc.value.code == 5
 
 
 def test_execute_retries_timeouts_indefinitely_then_succeeds() -> None:
@@ -147,6 +168,59 @@ def test_execute_retries_timeouts_indefinitely_then_succeeds() -> None:
     assert [m["id"] for m in items] == [10, 11, 20]
     assert missing == 0
     assert len(vk.calls) == 3
+
+
+def test_execute_oversized_response_downgrades_to_per_batch_get_by_id() -> None:
+    """VK code 13 ("response size is too big") means the bundled execute
+    payload is unusable. The loop must downgrade to running each
+    sub-batch as a standalone messages.getById and stitch the per-batch
+    results back together — one ugly batch shouldn't kill the worker."""
+    oversized = VKApiError(13, "Runtime error occurred during code invocation:"
+                               " response size is too big")
+    # After the execute hard error, three per-batch getById calls
+    # follow; each returns its own slice of items.
+    batches = [[1, 2], [3, 4], [5]]
+    per_batch_responses = [
+        {"items": [{"id": 1}, {"id": 2}]},
+        {"items": [{"id": 3}, {"id": 4}]},
+        {"items": [{"id": 5}]},
+    ]
+    vk = _FakeVK([oversized, *per_batch_responses])
+    limiter = RateLimiter(100.0)
+    stop = asyncio.Event()
+    progress = _LogReporter()
+
+    items, missing = _run(fetch_data._execute_get_by_id_with_backoff(
+        vk, limiter, batches, stop, progress,
+    ))
+    assert [m["id"] for m in items] == [1, 2, 3, 4, 5]
+    assert missing == 0
+    # 1 execute + 3 messages.getById = 4 vk calls total.
+    methods = [c[0] for c in vk.calls]
+    assert methods == ["execute", "messages.getById", "messages.getById", "messages.getById"]
+    assert any("downgrading" in ln and "code=13" in ln for ln in progress.lines), \
+        progress.lines
+
+
+def test_execute_rate_limit_does_not_downgrade() -> None:
+    """Rate-limit on execute is just a pacing problem — keep retrying
+    the same execute. It must NOT trigger the per-batch downgrade
+    (which would 25x the request count and make the throttle worse)."""
+    rate_limited = VKApiError(6, "Too many requests per second")
+    good_response = [{"count": 1, "items": [{"id": 7}]}]
+    vk = _FakeVK([rate_limited, rate_limited, (good_response, [])])
+    limiter = RateLimiter(100.0)
+    stop = asyncio.Event()
+    progress = _LogReporter()
+
+    items, missing = _run(fetch_data._execute_get_by_id_with_backoff(
+        vk, limiter, [[7]], stop, progress,
+    ))
+    assert [m["id"] for m in items] == [7]
+    assert missing == 0
+    methods = [c[0] for c in vk.calls]
+    assert methods == ["execute", "execute", "execute"]
+    assert not any("downgrading" in ln for ln in progress.lines)
 
 
 def test_stop_during_timeout_retry_short_circuits() -> None:

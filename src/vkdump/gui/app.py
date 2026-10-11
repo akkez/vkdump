@@ -1,6 +1,7 @@
 import signal
 import sys
 
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
@@ -9,6 +10,9 @@ from .main_window import MainWindow
 
 
 def main() -> int:
+    smoke_test = "--smoke-test" in sys.argv
+    if smoke_test:
+        sys.argv.remove("--smoke-test")
     # Ctrl+C while a QPropertyAnimation is mid-tick lands inside a
     # Python property setter and triggers a libpyside "metacall
     # WriteProperty" traceback. SIG_DFL terminates immediately before
@@ -20,8 +24,12 @@ def main() -> int:
     icon_path = resource_dir() / "assets" / "icon.png"
     if icon_path.is_file():
         qt_app.setWindowIcon(QIcon(str(icon_path)))
+    elif smoke_test:
+        raise FileNotFoundError(icon_path)
     window = MainWindow()
     window.show()
+    if smoke_test:
+        QTimer.singleShot(100, window.close)
     return qt_app.exec()
 
 

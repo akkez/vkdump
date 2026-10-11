@@ -1,0 +1,117 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            platform: macos-arm64
+          - runner: macos-15-intel
+            platform: macos-x86_64
+          - runner: windows-latest
+            platform: windows-x86_64
+          - runner: ubuntu-22.04
+            platform: linux-x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install Qt system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libxkbcommon0 libxkbcommon-x11-0 libdbus-1-3 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-sync1 \
+            libxcb-xfixes0 libxcb-xkb1 libxkbfile1
+      - name: Install dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest
+      - name: Build
+        run: python build.py
+      - name: Package and test extracted binaries
+        run: python scripts/package_release.py --platform ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vkdump-${{ matrix.platform }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: vkdump-*
+          path: release
+          merge-multiple: true
+      - name: Upload release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --draft --title "${TAG#v}" --notes "Initial release."
+          fi
+          gh release upload "$TAG" release/* --clobber
+      - name: Generate cask checksums
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python scripts/update_cask.py "$TAG"
+      - name: Update cask on master
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = 'Casks/vkdump.rb';
+            const content = fs.readFileSync(path);
+            let existing;
+            try {
+              existing = (await github.rest.repos.getContent({ ...context.repo, path, ref: 'master' })).data;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            if (existing && Buffer.from(existing.content, 'base64').equals(content)) return;
+            await github.rest.repos.createOrUpdateFileContents({
+              ...context.repo,
+              path,
+              branch: 'master',
+              message: `Update vkdump cask to ${context.ref.split('/').pop()}`,
+              content: content.toString('base64'),
+              ...(existing ? { sha: existing.sha } : {}),
+            });
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release edit "$TAG" --draft=false

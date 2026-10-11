@@ -168,13 +168,13 @@ def _frozen() -> bool:
 
 
 def app_dir() -> Path:
-    """Writable app directory: next to the executable when frozen, repo root otherwise."""
+    """Writable data directory for source, portable bundles, and installed macOS apps."""
     if not _frozen():
         return Path(__file__).resolve().parents[3]
     exe = Path(sys.executable).resolve()
     for parent in exe.parents:
         if parent.suffix == ".app":
-            return parent.parent
+            return Path.home() / "Library" / "Application Support" / "vkdump"
     return exe.parent
 
 

@@ -6,12 +6,13 @@ Usage:
     python build.py --target cli          # build only the CLI binary
     python build.py --no-clean            # incremental (faster, may reuse stale artifacts)
 
-Output goes to iso/build/dist/. PyInstaller cannot cross-compile, so a Windows
+Output goes to build/dist/. PyInstaller cannot cross-compile, so a Windows
 .exe must be built on Windows; a macOS .app on macOS; etc.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 import shutil
 import subprocess
@@ -20,14 +21,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
-BUILD_DIR = ROOT.parent / "build"
+BUILD_DIR = ROOT / "build"
 DIST_DIR = BUILD_DIR / "dist"
 WORK_DIR = BUILD_DIR / "work"
-
-TARGETS: dict[str, dict[str, str]] = {
-    "gui": {"spec": "vkdump-gui.spec", "name": "vkdump-gui"},
-    "cli": {"spec": "vkdump-cli.spec", "name": "vkdump"},
-}
 
 
 def _run(cmd: list[str]) -> None:
@@ -54,27 +50,24 @@ def _clean() -> None:
             shutil.rmtree(d)
 
 
-def _binary_path(name: str) -> Path:
+def _binary_path(target: str) -> Path:
     """Best-effort path to the produced binary for reporting."""
+    name = "vkdump-gui" if target == "gui" else "vkdump"
     if platform.system() == "Windows":
-        onefile = DIST_DIR / f"{name}.exe"
-        if onefile.exists():
-            return onefile
-        return DIST_DIR / name / f"{name}.exe"
+        return DIST_DIR / "vkdump" / f"{name}.exe"
     if platform.system() == "Darwin":
-        app = DIST_DIR / f"{name}.app"
-        if app.exists():
+        app = DIST_DIR / "VKdump.app"
+        if target == "gui":
             return app / "Contents" / "MacOS" / name
     onefile = DIST_DIR / name
     if onefile.is_file():
         return onefile
-    return DIST_DIR / name / name
+    return DIST_DIR / "vkdump" / name
 
 
-def _build_target(target: str) -> bool:
-    spec = ROOT / TARGETS[target]["spec"]
-    name = TARGETS[target]["name"]
-    print(f"\n=== Building {target} ({spec.name}) ===", flush=True)
+def _build(target: str) -> None:
+    spec = ROOT / "vkdump.spec"
+    os.environ["VKDUMP_BUILD_TARGET"] = target
     _run(
         [
             sys.executable,
@@ -88,9 +81,6 @@ def _build_target(target: str) -> bool:
             "--noconfirm",
         ]
     )
-    binary = _binary_path(name)
-    print(f"  -> {binary}")
-    return binary.exists()
 
 
 def main() -> int:
@@ -111,9 +101,12 @@ def main() -> int:
     BUILD_DIR.mkdir(exist_ok=True)
 
     targets = ["gui", "cli"] if args.target == "both" else [args.target]
+    _build(args.target)
     ok = True
     for t in targets:
-        if not _build_target(t):
+        binary = _binary_path(t)
+        print(f"  -> {binary}")
+        if not binary.exists():
             ok = False
             print(f"WARNING: {t} binary not found at expected path.", file=sys.stderr)
 

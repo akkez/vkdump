@@ -17,4 +17,4 @@ open -a /Applications/VKdump.app
 
 ## Windows / Linux
 
-Download from [Releases](https://github.com/akkez/vkdump/releases), extract, and run `vkdump` (`vkdump.exe` on Windows). CLI: `vkdump-cli --help`.
+Download from [Releases](https://github.com/akkez/vkdump/releases), extract, and run `vkdump` (`vkdump.exe` on Windows).

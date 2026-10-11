@@ -52,16 +52,13 @@ def _clean() -> None:
 
 def _binary_path(target: str) -> Path:
     """Best-effort path to the produced binary for reporting."""
-    name = "vkdump-gui" if target == "gui" else "vkdump"
+    name = "vkdump" if target == "gui" else "vkdump-cli"
     if platform.system() == "Windows":
         return DIST_DIR / "vkdump" / f"{name}.exe"
     if platform.system() == "Darwin":
         app = DIST_DIR / "VKdump.app"
-        if target == "gui":
+        if app.is_dir():
             return app / "Contents" / "MacOS" / name
-    onefile = DIST_DIR / name
-    if onefile.is_file():
-        return onefile
     return DIST_DIR / "vkdump" / name
 
 

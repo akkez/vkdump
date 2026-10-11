@@ -1,5 +1,6 @@
 import argparse
 import platform
+import plistlib
 import shutil
 import sqlite3
 import subprocess
@@ -17,8 +18,14 @@ DIST = ROOT / "build" / "dist"
 def check_bundle(directory: Path) -> None:
     macos = platform.system() == "Darwin"
     suffix = ".exe" if platform.system() == "Windows" else ""
-    cli = directory / ("vkdump" if macos else "vkdump/vkdump" + suffix)
-    gui = directory / ("VKdump.app/Contents/MacOS/vkdump-gui" if macos else "vkdump/vkdump-gui" + suffix)
+    binary_dir = directory / ("VKdump.app/Contents/MacOS" if macos else "vkdump")
+    cli = binary_dir / ("vkdump-cli" + suffix)
+    gui = binary_dir / ("vkdump" + suffix)
+    if macos:
+        with (directory / "VKdump.app/Contents/Info.plist").open("rb") as file:
+            info = plistlib.load(file)
+        if info["CFBundleExecutable"] != "vkdump" or info.get("LSBackgroundOnly", False):
+            raise RuntimeError("The app bundle must launch the GUI")
     expected = {path.name for path in (ROOT / "migrations").glob("*.sql")}
     with tempfile.TemporaryDirectory() as tmp:
         cwd = Path(tmp)
@@ -44,7 +51,6 @@ def main() -> None:
         staging.mkdir()
         if args.platform.startswith("macos-"):
             shutil.copytree(DIST / "VKdump.app", staging / "VKdump.app", symlinks=True)
-            shutil.copy2(DIST / "vkdump", staging / "vkdump")
             archive = release / f"vkdump-{args.platform}.zip"
             subprocess.run(["ditto", "-c", "-k", "--sequesterRsrc", str(staging), str(archive)], check=True)
         else:

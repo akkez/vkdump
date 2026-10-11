@@ -20,8 +20,10 @@ dev = [
 ]
 
 [project.scripts]
-vkdump = "vkdump.cli.main:app"
-vkdump-gui = "vkdump.gui.app:main"
+vkdump-cli = "vkdump.cli.main:app"
+
+[project.gui-scripts]
+vkdump = "vkdump.gui.app:main"
 
 [build-system]
 requires = ["hatchling"]

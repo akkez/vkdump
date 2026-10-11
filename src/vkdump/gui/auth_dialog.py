@@ -1,15 +1,16 @@
-"""Modal dialog for pasting a VK API access token (or the full vkhost
+"""Modal dialog for pasting a VK API access token (or the full OAuth
 redirect URL) and validating it before persisting to the accounts table.
 """
 from __future__ import annotations
 
 import asyncio
+from html import escape
 import re
 import secrets
 from typing import Any
 from urllib.parse import parse_qs
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -26,6 +27,10 @@ from ..core.vk_api import VKApi, VKApiError
 
 
 _ACTIVE_KEY = "active_account_id"
+_AUTHORIZE_URL = (
+    "https://oauth.vk.com/authorize?client_id=6463690&scope=215989462"
+    "&redirect_uri=https://oauth.vk.com/blank.html&display=page&response_type=token&revoke=1"
+)
 _TOKEN_RE = re.compile(r"access_token=([A-Za-z0-9._\-]+)")
 _BARE_RE = re.compile(r"^[A-Za-z0-9._\-]{20,}$")
 # VK's error_msg for an unknown method points the developer at the
@@ -125,7 +130,7 @@ def _label(u: dict) -> str:
 
 
 class AuthDialog(QDialog):
-    """Modal: paste vkhost URL or bare token, validate, upsert account."""
+    """Modal: paste OAuth URL or bare token, validate, upsert account."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -136,17 +141,17 @@ class AuthDialog(QDialog):
 
         instructions = QLabel(
             "<ol>"
-            "<li>Open <a href='https://vkhost.github.io/'>https://vkhost.github.io/</a></li>"
-            "<li>Click <b>Kate Mobile</b></li>"
-            "<li>Grant access</li>"
+            f"<li>Open <a href='{_AUTHORIZE_URL}'>{escape(_AUTHORIZE_URL)}</a></li>"
+            "<li>Authorize and Grant Access</li>"
             "<li>Paste the full resulting URL (or just the <code>access_token</code> value) below and press OK</li>"
             "</ol>"
         )
         instructions.setOpenExternalLinks(True)
         instructions.setWordWrap(True)
         instructions.setTextInteractionFlags(
-            instructions.textInteractionFlags()
-            | instructions.textInteractionFlags().__class__.TextSelectableByMouse
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+            | Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
         )
 
         self._input = QLineEdit()

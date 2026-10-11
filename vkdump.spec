@@ -14,7 +14,7 @@ for kind in ("gui", "cli"):
     if target not in (kind, "both"):
         continue
     gui = kind == "gui"
-    name = "vkdump-gui" if gui else "vkdump"
+    name = "vkdump" if gui else "vkdump-cli"
     data = [(str(root / "migrations"), "migrations")]
     if gui:
         data.append((str(root / "assets"), "assets"))
@@ -31,13 +31,11 @@ for kind in ("gui", "cli"):
     )
     pyz = PYZ(analysis.pure)
     icon = root / "assets" / ("icon.ico" if sys.platform == "win32" else "icon.icns")
-    onefile = sys.platform == "darwin" and not gui
     exe = EXE(
         pyz,
         analysis.scripts,
-        analysis.binaries if onefile else [],
-        analysis.datas if onefile else [],
-        exclude_binaries=not onefile,
+        [],
+        exclude_binaries=True,
         name=name,
         debug=False,
         bootloader_ignore_signals=False,
@@ -47,21 +45,23 @@ for kind in ("gui", "cli"):
         disable_windowed_traceback=False,
         icon=str(icon) if gui else None,
     )
-    if sys.platform == "darwin":
-        if gui:
-            coll = COLLECT(exe, analysis.binaries, analysis.datas, name=name, strip=False, upx=False)
-            app = BUNDLE(
-                coll,
-                name="VKdump.app",
-                icon=str(root / "assets" / "icon.icns"),
-                bundle_identifier="ru.akkez.vkdump",
-                version=__version__,
-                info_plist={"CFBundleDisplayName": "VKdump", "NSHighResolutionCapable": True},
-            )
-    else:
-        executables.append(exe)
-        binaries.extend(analysis.binaries)
-        datas.extend(analysis.datas)
+    executables.append(exe)
+    binaries.extend(analysis.binaries)
+    datas.extend(analysis.datas)
 
-if sys.platform != "darwin":
-    coll = COLLECT(*executables, binaries, datas, name="vkdump", strip=False, upx=False)
+coll = COLLECT(*executables, binaries, datas, name="vkdump", strip=False, upx=False)
+
+if sys.platform == "darwin" and target in ("gui", "both"):
+    app = BUNDLE(
+        coll,
+        name="VKdump.app",
+        icon=str(root / "assets" / "icon.icns"),
+        bundle_identifier="ru.akkez.vkdump",
+        version=__version__,
+        info_plist={
+            "CFBundleDisplayName": "VKdump",
+            "CFBundleExecutable": "vkdump",
+            "LSBackgroundOnly": False,
+            "NSHighResolutionCapable": True,
+        },
+    )

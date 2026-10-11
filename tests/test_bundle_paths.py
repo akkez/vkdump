@@ -5,14 +5,14 @@ from vkdump.core import db
 
 def test_installed_macos_app_data_is_in_user_home(monkeypatch, tmp_path):
     monkeypatch.setattr(db.sys, "frozen", True, raising=False)
-    monkeypatch.setattr(db.sys, "executable", str(tmp_path / "VKdump.app" / "Contents" / "MacOS" / "vkdump-gui"))
+    monkeypatch.setattr(db.sys, "executable", str(tmp_path / "VKdump.app" / "Contents" / "MacOS" / "vkdump"))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     assert db.app_dir() == tmp_path / "Library" / "Application Support" / "vkdump"
 
 
 def test_portable_data_is_next_to_executable(monkeypatch, tmp_path):
     monkeypatch.setattr(db.sys, "frozen", True, raising=False)
-    monkeypatch.setattr(db.sys, "executable", str(tmp_path / "vkdump-gui"))
+    monkeypatch.setattr(db.sys, "executable", str(tmp_path / "vkdump"))
     assert db.app_dir() == tmp_path
 
 

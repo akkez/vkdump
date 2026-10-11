@@ -6,6 +6,7 @@ import subprocess
 import os
 import tarfile
 import tempfile
+from contextlib import closing
 from pathlib import Path
 
 
@@ -26,7 +27,7 @@ def check_bundle(directory: Path) -> None:
         for name, command in (("cli", [str(cli), "db", "migrate"]), ("gui", [str(gui), "--smoke-test"])):
             database = cwd / f"{name}.db"
             subprocess.run(command, cwd=cwd, env=env | {"DB_PATH": str(database)}, check=True, timeout=60)
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 actual = {row[0] for row in connection.execute("SELECT name FROM _migrations")}
             if actual != expected:
                 raise RuntimeError(f"{name}: bundled migrations differ: {actual ^ expected}")

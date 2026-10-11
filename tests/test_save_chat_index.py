@@ -136,7 +136,7 @@ def test_open_path_appends_chat_id_anchor(tmp_path: Path) -> None:
     result = {"output_dir": str(tmp_path), "chat_id": 274}
     path = _save_chat_open_path(result)
     assert path is not None
-    assert path.endswith("/index.html#chat-274")
+    assert path == f"{tmp_path / 'index.html'}#chat-274"
 
 
 def test_open_path_drops_anchor_in_all_chats_mode(tmp_path: Path) -> None:
@@ -157,7 +157,7 @@ def test_open_path_drops_anchor_in_all_chats_mode(tmp_path: Path) -> None:
     path = _save_chat_open_path(result)
     assert path is not None
     assert "#" not in path
-    assert path.endswith("/index.html")
+    assert path == str(tmp_path / "index.html")
 
 
 def test_upsert_roundtrip_through_load(tmp_path: Path) -> None:

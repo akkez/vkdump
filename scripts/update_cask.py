@@ -27,13 +27,13 @@ def main() -> None:
   desc "Parse and export VK chat archives"
   homepage "https://github.com/akkez/vkdump"
 
-  depends_on macos: ">= :sonoma"
+  depends_on macos: :sonoma
 
   app "VKdump.app"
 
-  postflight do
-    system_command "/usr/bin/xattr",
-                   args: ["-rd", "com.apple.quarantine", "#{{appdir}}/VKdump.app"]
+  postflight_steps do
+    run "/usr/bin/xattr",
+        args: ["-rd", "com.apple.quarantine", "{{{{appdir}}}}/VKdump.app"]
   end
 end
 '''

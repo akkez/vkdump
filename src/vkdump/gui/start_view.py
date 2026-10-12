@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
+from PySide6.QtCore import Qt, Signal, QUrl
+from PySide6.QtGui import QDesktopServices, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QFormLayout, QFrame, QHBoxLayout, QLabel, QRadioButton, QSpinBox,
     QStackedWidget, QVBoxLayout, QWidget, QWizard,
@@ -14,6 +14,7 @@ from .task_panel import TaskPanel
 from .xp_widgets import XPButton, XPCaption, XPFrame, XPRadioButton
 
 
+ARCHIVE_URL = 'https://vk.ru/data_protection?section=rules#archive'
 WELCOME, SOURCE, IMPORT, DOWNLOAD = range(4)
 WIZARD_WIDTH, WIZARD_HEIGHT = 640, 463
 
@@ -93,7 +94,7 @@ class _SourcePage(QWidget):
             layout.addSpacing(24)
             radio.toggled.connect(self.completeChanged)
         layout.addStretch(1)
-        archive_link = QLabel("Don't have a copy? <a href='https://vk.ru/data_protection?section=rules#archive'>Request a VK archive</a>")
+        archive_link = QLabel(f"Don't have a copy? <a href='{ARCHIVE_URL}'>Request a VK archive</a>")
         self.archive_link = archive_link
         archive_link.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         archive_link.setOpenExternalLinks(True)
@@ -266,6 +267,9 @@ class _StartWizard(QWidget):
             button.update()
 
     def _advance(self) -> None:
+        if self.currentId() == SOURCE and self._owner._source_page.archive_link.hasFocus():
+            QDesktopServices.openUrl(QUrl(ARCHIVE_URL))
+            return
         kind = QWizard.WizardButton.FinishButton if self.currentId() in (IMPORT, DOWNLOAD) else QWizard.WizardButton.NextButton
         button = self.button(kind)
         if button.isEnabled():

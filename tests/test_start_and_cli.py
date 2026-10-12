@@ -462,3 +462,23 @@ def test_wizard_keyboard_navigation_and_space_activation(window, qapp):
     assert cancel.hasFocus()
     QTest.keyClick(cancel, Qt.Key.Key_Tab)
     assert start._auth_btn.hasFocus()
+
+
+def test_wizard_archive_link_opens_with_enter(window, qapp, monkeypatch):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QDesktopServices
+    from PySide6.QtTest import QTest
+    from vkdump.gui.start_view import ARCHIVE_URL
+
+    opened = []
+    monkeypatch.setattr(QDesktopServices, 'openUrl', lambda url: opened.append(url.toString()) or True)
+    window.show()
+    window.activateWindow()
+    wizard = window._start_view._wizard
+    wizard.next()
+    qapp.processEvents()
+    link = window._start_view._source_page.archive_link
+    link.setFocus()
+    QTest.keyClick(link, Qt.Key.Key_Return)
+    assert opened == [ARCHIVE_URL]
+    assert wizard.currentId() == SOURCE

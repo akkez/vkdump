@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="210" height="405" viewBox="0 0 166 320">
+<defs>
+ <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#04053d"/><stop offset="1" stop-color="#08053f"/></linearGradient>
+ <pattern id="dots" width="2" height="2" patternUnits="userSpaceOnUse"><rect width="2" height="2" fill="#09073f"/><rect width="1" height="1" fill="#15134e"/></pattern>
+</defs>
+<rect width="166" height="320" fill="url(#bg)"/>
+<rect width="166" height="320" fill="url(#dots)"/>
+<g fill="none" stroke="#1213a4" stroke-width="2.2">
+ <circle cx="25" cy="100" r="46"/><ellipse cx="25" cy="100" rx="22" ry="46"/>
+ <path d="M-21 100h92M25 54v92M-15 77q40 20 81 0M-15 123q40-20 81 0M-8 64q34 23 66 0M-8 136q34-23 66 0"/>
+ <path d="M84 159l38-43 36 25-37 43zM89 157l33-35 29 20-32 35zM76 164l43 29 42-45v21l-42 45-43-29zM119 193v21M83 183l32 22M91 179l26 18"/>
+ <g transform="translate(-22 209) rotate(-20 58 50)">
+  <path d="M21 21l47-9 24 28-46 10zM19 23v25l26 27 49-12V38M45 50v25M29 60v26l48-11V65M34 21V8l43-7 17 24M77 1v17l17 7M45 18l28-5M50 26l27-5M21 42L4 52l27 31M94 40l17 19-22 7"/>
+  <path d="M33 76l-3 17 48-9 3-16M40 81l29-5M38 86l29-5"/>
+ </g>
+</g>
+<rect x="88" y="17" width="58" height="58" fill="#050533" stroke="#fff" stroke-width="3"/>
+<g fill="none" stroke="#fff" stroke-width="1.7" stroke-linejoin="round">
+ <path d="M99 35l15-10 17 7-15 10zM99 35v14l17 8V42M116 42l15-10v13M104 32v-7l9-5 16 7v4M101 49l-7 5 17 9 9-6M111 63v6l14-9v-6"/>
+ <path d="M119 43l12-7 10 5-12 8zM119 43v17l10 8 12-8V41M129 49v19M124 40v-5l7-4 7 4v5M122 54l4 3M123 60l3 2"/>
+</g>
+</svg>

@@ -1,0 +1,13 @@
+Chicago95 icons by the Chicago95 contributors.
+Source: https://github.com/grassmunk/Chicago95
+
+computer.png: Icons/Chicago95/devices/48/computer.png
+archive.png: Icons/Chicago95/places/48/folder-documents.png
+setup.png: Icons/Chicago95/apps/48/system-software-install.png
+
+Upstream repository notice: Chicago95-README.txt (Code and license section).
+The repository declares GPL-3.0+/MIT.
+
+internet-sidebar.png: User-provided Internet Connection Wizard screenshot.
+Exact crop: x=3, y=30, width=164, height=368; source size=542x448.
+lis420.png: https://vk.ru/sticker/1-4535-352b

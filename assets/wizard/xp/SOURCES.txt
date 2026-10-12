@@ -1,0 +1,2 @@
+Caption button assets: https://github.com/botoxparty/XP.css/tree/main/themes/XP/icon
+Copyright 2020 Adam Hammad, Jordan Scales, MIT license (see LICENSE).

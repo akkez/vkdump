@@ -6,7 +6,7 @@ from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QLinearGradient, QPainter, QPen, QRegion
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
-    QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QStyle, QVBoxLayout, QWidget,
+    QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QRadioButton, QStyle, QStyleOptionButton, QVBoxLayout, QWidget,
 )
 
 from ..core.db import resource_dir
@@ -21,6 +21,7 @@ class XPButton(QPushButton):
     def __init__(self, text: str, parent: QWidget | None = None):
         super().__init__(text, parent)
         self.setFont(XP_FONT)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFixedHeight(29)
         self.setMinimumWidth(94)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover)
@@ -71,6 +72,24 @@ class XPButton(QPushButton):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
             painter.setPen(QPen(QColor('#000000'), 1, Qt.PenStyle.DotLine))
             painter.drawRect(self.rect().adjusted(5, 5, -6, -6))
+
+
+class XPRadioButton(QRadioButton):
+    def __init__(self, text: str, parent: QWidget | None = None):
+        super().__init__(text, parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.isEnabled() and self.hasFocus():
+            option = QStyleOptionButton()
+            self.initStyleOption(option)
+            rect = self.style().subElementRect(QStyle.SubElement.SE_RadioButtonContents, option, self)
+            rect.setWidth(min(rect.width(), self.fontMetrics().horizontalAdvance(self.text()) + 4))
+            painter = QPainter(self)
+            painter.setPen(QPen(QColor('#000000'), 1, Qt.PenStyle.DotLine))
+            painter.drawRect(rect.adjusted(0, 0, -1, -1))
 
 
 class _CaptionButton(QPushButton):

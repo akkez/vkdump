@@ -416,3 +416,49 @@ def test_wizard_fox_appears_after_welcome(window, qapp):
     assert wizard._fox.isVisible()
     assert wizard._owner._source_page.layout().contentsMargins().left() == 23
 
+
+def test_wizard_keyboard_navigation_and_space_activation(window, qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    window.show()
+    window.activateWindow()
+    qapp.processEvents()
+    start = window._start_view
+    wizard = start._wizard
+    next_button = wizard.button(QWizard.WizardButton.NextButton)
+    cancel = wizard.button(QWizard.WizardButton.CancelButton)
+    next_button.setFocus()
+    QTest.keyClick(next_button, Qt.Key.Key_Tab)
+    assert cancel.hasFocus()
+    QTest.keyClick(cancel, Qt.Key.Key_Backtab)
+    assert next_button.hasFocus()
+    QTest.keyPress(next_button, Qt.Key.Key_Space)
+    assert next_button.isDown()
+    assert wizard.currentId() == WELCOME
+    QTest.keyRelease(next_button, Qt.Key.Key_Space)
+    assert not next_button.isDown()
+    assert wizard.currentId() == SOURCE
+    archive = start._source_page.archive
+    account = start._source_page.account
+    assert archive.hasFocus()
+    QTest.keyClick(archive, Qt.Key.Key_Space)
+    assert archive.isChecked()
+    QTest.keyClick(archive, Qt.Key.Key_Down)
+    assert account.isChecked()
+    assert account.hasFocus()
+    QTest.keyClick(account, Qt.Key.Key_Tab)
+    assert start._source_page.archive_link.hasFocus()
+    QTest.keyClick(start._source_page.archive_link, Qt.Key.Key_Tab)
+    assert wizard.button(QWizard.WizardButton.BackButton).hasFocus()
+    QTest.keyClick(wizard.button(QWizard.WizardButton.BackButton), Qt.Key.Key_Tab)
+    assert next_button.hasFocus()
+    QTest.keyClick(next_button, Qt.Key.Key_Space)
+    assert wizard.currentId() == DOWNLOAD
+    assert start._auth_btn.hasFocus()
+    QTest.keyClick(start._auth_btn, Qt.Key.Key_Tab)
+    assert wizard.button(QWizard.WizardButton.BackButton).hasFocus()
+    QTest.keyClick(wizard.button(QWizard.WizardButton.BackButton), Qt.Key.Key_Tab)
+    assert cancel.hasFocus()
+    QTest.keyClick(cancel, Qt.Key.Key_Tab)
+    assert start._auth_btn.hasFocus()

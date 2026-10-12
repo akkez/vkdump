@@ -11,7 +11,7 @@ from ..core import app_config
 from ..core.db import connection, resource_dir
 from .auth_dialog import AuthDialog
 from .task_panel import TaskPanel
-from .xp_widgets import XPButton, XPCaption, XPFrame
+from .xp_widgets import XPButton, XPCaption, XPFrame, XPRadioButton
 
 
 WELCOME, SOURCE, IMPORT, DOWNLOAD = range(4)
@@ -69,8 +69,8 @@ class _SourcePage(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.archive = QRadioButton('I already have a VK archive')
-        self.account = QRadioButton("I don't have a VK archive")
+        self.archive = XPRadioButton('I already have a VK archive')
+        self.account = XPRadioButton("I don't have a VK archive")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(23, 18, 22, 18)
         layout.setSpacing(0)
@@ -86,6 +86,7 @@ class _SourcePage(QWidget):
         ):
             layout.addWidget(radio)
             layout.addSpacing(7)
+            radio.setAccessibleDescription(description)
             copy = _RadioDescription(description, radio)
             copy.setContentsMargins(22, 0, 0, 0)
             layout.addWidget(copy)
@@ -93,6 +94,8 @@ class _SourcePage(QWidget):
             radio.toggled.connect(self.completeChanged)
         layout.addStretch(1)
         archive_link = QLabel("Don't have a copy? <a href='https://vk.ru/data_protection?section=rules#archive'>Request a VK archive</a>")
+        self.archive_link = archive_link
+        archive_link.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         archive_link.setOpenExternalLinks(True)
         layout.addWidget(archive_link)
         layout.addSpacing(7)
@@ -216,9 +219,34 @@ class _StartWizard(QWidget):
         self._fox.raise_()
         self._sync()
         self.currentIdChanged.emit(self.currentId())
-        button = self.button(QWizard.WizardButton.FinishButton if self.currentId() in (IMPORT, DOWNLOAD)
-                             else QWizard.WizardButton.NextButton)
-        button.setFocus(Qt.FocusReason.OtherFocusReason)
+        if self.currentId() == SOURCE:
+            page = self._owner._source_page
+            target = page.account if page.account.isChecked() else page.archive
+        elif self.currentId() == DOWNLOAD:
+            target = self._owner._auth_btn
+        else:
+            target = self.button(QWizard.WizardButton.FinishButton if self.currentId() == IMPORT
+                                 else QWizard.WizardButton.NextButton)
+        target.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def focusNextPrevChild(self, next: bool) -> bool:
+        controls = []
+        if self.currentId() == SOURCE:
+            page = self._owner._source_page
+            controls.extend((page.archive, page.account, page.archive_link))
+        elif self.currentId() == DOWNLOAD:
+            controls.append(self._owner._auth_btn)
+        controls.extend(self._buttons.values())
+        controls = [control for control in controls if control.isVisible() and control.isEnabled()]
+        if not controls:
+            return False
+        focused = self.window().focusWidget()
+        if focused in controls:
+            index = (controls.index(focused) + (1 if next else -1)) % len(controls)
+        else:
+            index = 0 if next else -1
+        controls[index].setFocus(Qt.FocusReason.TabFocusReason if next else Qt.FocusReason.BacktabFocusReason)
+        return True
 
     def _sync(self) -> None:
         current = self.currentId()

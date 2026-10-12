@@ -12,7 +12,7 @@ brew install --cask akkez/vkdump/vkdump
 open -a /Applications/VKdump.app
 
 # CLI
-/Applications/VKdump.app/Contents/MacOS/vkdump-cli --help
+/Applications/VKdump.app/Contents/MacOS/vkdump-cli
 ```
 
 ## Windows / Linux

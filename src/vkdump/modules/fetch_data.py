@@ -30,12 +30,12 @@ A background ticker logs scrape throughput every 10 seconds as 1m / 5m /
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from typing import Iterator
 
 from loguru import logger
 
+from ..core.api_store import persist_messages as _persist_batch
 from ..core import app_config
 from ..core.db import connection
 from ..core.progress import Cancelled, ProgressReporter, Throttle
@@ -53,13 +53,14 @@ _RATE_LIMIT_BACKOFF_S = (2, 3, 5, 7, 10, 15)
 _TIMEOUT_RETRY_S = 2.0
 _THROUGHPUT_TICK_S = 10.0
 _EXECUTE_MAX_CALLS = 25
+_EXECUTE_THREADS = 4
 
 
 def run(params: dict, progress: ProgressReporter) -> dict:
-    strategy = (params.get("strategy") or "get-by-id").strip()
+    strategy = (params.get("strategy") or "execute").strip()
     if strategy not in ("get-by-id", "execute"):
         raise ValueError(f"unknown strategy: {strategy!r}")
-    threads = max(1, int(params.get("threads") or 4))
+    threads = max(1, int(params.get("threads") or _EXECUTE_THREADS))
     per_request = int(params.get("per_request") or _EXECUTE_MAX_CALLS)
     per_request = max(1, min(per_request, _EXECUTE_MAX_CALLS))
 
@@ -744,31 +745,3 @@ def _summarize_execute_response(
                             items.append(m)
     failed = max(0, calls_in - ok)
     return items, ok, failed
-
-
-def _persist_batch(account_pk: int, items: list[dict]) -> None:
-    rows = []
-    for m in items:
-        vk_id = m.get("id")
-        peer_id = m.get("peer_id")
-        if not isinstance(vk_id, int) or not isinstance(peer_id, int):
-            continue
-        attachments = m.get("attachments") or None
-        rows.append(
-            (
-                account_pk,
-                peer_id,
-                vk_id,
-                json.dumps(m, ensure_ascii=False),
-                json.dumps(attachments, ensure_ascii=False) if attachments else None,
-            )
-        )
-    if not rows:
-        return
-    with connection() as conn:
-        conn.executemany(
-            "INSERT OR IGNORE INTO api_messages"
-            " (account_id, peer_id, vk_message_id, message_data, attachment_data)"
-            " VALUES (?, ?, ?, ?, ?)",
-            rows,
-        )

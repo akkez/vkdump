@@ -30,7 +30,9 @@ def check_bundle(directory: Path) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         cwd = Path(tmp)
         env = os.environ | {"QT_QPA_PLATFORM": "offscreen"}
-        subprocess.run([str(cli), "--help"], cwd=cwd, env=env, check=True, timeout=60)
+        usage = subprocess.run([str(cli)], cwd=cwd, env=env, capture_output=True, text=True, timeout=60)
+        if usage.returncode not in (0, 2) or "download-messages" not in usage.stdout:
+            raise RuntimeError("CLI command overview is unavailable")
         for name, command in (("cli", [str(cli), "db", "migrate"]), ("gui", [str(gui), "--smoke-test"])):
             database = cwd / f"{name}.db"
             subprocess.run(command, cwd=cwd, env=env | {"DB_PATH": str(database)}, check=True, timeout=60)

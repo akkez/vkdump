@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import date, datetime
 from pathlib import Path
@@ -31,7 +32,8 @@ def _short_error(err: str | None) -> str:
     return (lines[-1] if lines else "")[:80]
 
 
-app = typer.Typer(help="vkdump — parse and enrich VK chat dumps.", no_args_is_help=True)
+app = typer.Typer(help="vkdump — parse and download VK messages.", no_args_is_help=True,
+                  add_completion=False, context_settings={"help_option_names": []})
 db_app = typer.Typer(help="Database management.", no_args_is_help=True)
 runs_app = typer.Typer(help="Inspect past task runs.", no_args_is_help=True)
 logs_app = typer.Typer(help="Inspect parse error logs.", no_args_is_help=True)
@@ -40,6 +42,41 @@ app.add_typer(runs_app, name="runs")
 app.add_typer(logs_app, name="logs")
 
 console = Console()
+
+
+@app.command("authorize")
+def authorize_cmd() -> None:
+    """Authorize a VK account using an OAuth redirect URL or access token."""
+    from ..core.vk_auth import _AUTHORIZE_URL, _parse_token_input, _validate, persist
+
+    console.print(f"Open {_AUTHORIZE_URL}")
+    console.print("Authorize and Grant Access, then paste the resulting URL or token.")
+    value = typer.prompt("OAuth URL or access token", hide_input=True)
+    token = _parse_token_input(value)
+    if not token:
+        console.print("[red]Invalid OAuth URL or token[/red]")
+        raise typer.Exit(1)
+    try:
+        info = asyncio.run(_validate(token))
+        apply_migrations()
+        persist(token, info)
+    except Exception as exc:
+        console.print(f"[red]Authorization failed:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    console.print(f"Authorized as {info['display_name']} (id{info['vk_id']})")
+
+
+@app.command("download-messages")
+def download_messages_cmd(
+    threads: Annotated[int, typer.Option("--threads", "-t", min=1,
+                                       help="Parallel execute requests.")] = 4,
+    per_request: Annotated[int, typer.Option("--per-request", "-p", min=1, max=25,
+                                           help="History calls per execute.")] = 25,
+    account: Annotated[int | None, typer.Option("--account", min=1,
+                                               help="VK user ID; defaults to the active account.")] = None,
+) -> None:
+    """Discover all conversations and download their full message histories."""
+    _run("download-messages", {"threads": threads, "per_request": per_request, "account": account})
 
 
 def _run(task_name: str, params: dict) -> None:
@@ -204,7 +241,7 @@ def fetch_data_cmd(
             "--strategy", "-s",
             help="`get-by-id` (sequential) or `execute` (batched, parallel).",
         ),
-    ] = "get-by-id",
+    ] = "execute",
     threads: Annotated[
         int,
         typer.Option(

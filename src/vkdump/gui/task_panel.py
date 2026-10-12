@@ -234,6 +234,10 @@ class TaskPanel(QWidget):
 
         form_widget = QWidget()
         form = QFormLayout(form_widget)
+        if task.name in ("download-messages", "fetch-data"):
+            form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
         for p in task.params:
             editor = self._make_editor(p)
             self._editors[p.name] = editor
@@ -403,7 +407,8 @@ class TaskPanel(QWidget):
             return row
         if p.type == "int":
             sb = QSpinBox()
-            sb.setMaximum(2_000_000_000)
+            sb.setRange(p.minimum if p.minimum is not None else 0,
+                        p.maximum if p.maximum is not None else 2_000_000_000)
             if initial is not None:
                 sb.setValue(int(initial))
             return sb

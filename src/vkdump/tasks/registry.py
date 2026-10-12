@@ -1,6 +1,6 @@
 from typing import Callable
 
-from ..modules import enrich, fetch_data, parse_dump, save_chat, stats
+from ..modules import download_messages, enrich, fetch_data, parse_dump, save_chat, stats
 from .spec import ParamSpec, TaskSpec
 
 
@@ -147,6 +147,23 @@ TASKS: list[TaskSpec] = [
         run=parse_dump.run,
     ),
     TaskSpec(
+        name="download-messages",
+        title="Download messages",
+        description="Discover all conversations, then download their complete message histories.",
+        params=[
+            ParamSpec(name="threads", type="int", label="Parallel threads", required=False,
+                      minimum=1,
+                      default=fetch_data._EXECUTE_THREADS,
+                      default_provider=_remember("download_messages.last_threads")),
+            ParamSpec(name="per_request", type="int", label="Calls per execute (1..25)",
+                      minimum=1, maximum=25,
+                      required=False, default=fetch_data._EXECUTE_MAX_CALLS,
+                      default_provider=_remember("download_messages.last_per_request")),
+        ],
+        run=download_messages.run,
+        requires_vk_token=True,
+    ),
+    TaskSpec(
         name="fetch-data",
         title="Fetch data",
         description=(
@@ -166,19 +183,19 @@ TASKS: list[TaskSpec] = [
                     " fan out across the configured thread count."
                 ),
                 required=False,
-                default="get-by-id",
+                default="execute",
                 choices=[
                     ("get-by-id", "1 — messages.getById"),
-                    ("execute", "2 — execute (batched)"),
+                    ("execute", "2 — Execute Batch"),
                 ],
-                default_provider=_remember("fetch_data.last_strategy"),
             ),
             ParamSpec(
                 name="threads",
                 type="int",
-                label="Parallel threads (execute only)",
+                label="Parallel threads",
                 help="Concurrent execute requests; ignored by get-by-id.",
                 required=False,
+                minimum=1,
                 default=4,
                 default_provider=_remember("fetch_data.last_threads"),
             ),
@@ -188,6 +205,8 @@ TASKS: list[TaskSpec] = [
                 label="Calls per execute (1..25)",
                 help="messages.getById sub-calls packed into one execute request.",
                 required=False,
+                minimum=1,
+                maximum=25,
                 default=25,
                 default_provider=_remember("fetch_data.last_per_request"),
             ),

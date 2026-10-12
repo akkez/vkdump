@@ -14,6 +14,8 @@ class ParamSpec:
     help: str = ""
     required: bool = True
     default: Any = None
+    minimum: int | None = None
+    maximum: int | None = None
     # For type="choice": static list of (value, label) options.
     choices: list[tuple[str, str]] = field(default_factory=list)
     # For type="choice" with options known only at form-build time

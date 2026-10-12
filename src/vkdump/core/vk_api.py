@@ -25,9 +25,12 @@ API_VERSION = "5.199"
 class VKApiError(RuntimeError):
     """Raised for any VK API failure (transport or logical)."""
 
-    def __init__(self, code: int | None, message: str) -> None:
+    def __init__(self, code: int | None, message: str, *,
+                 method: str | None = None, details: dict | None = None) -> None:
         self.code = code
         self.message = message
+        self.method = method
+        self.details = details
         if code is None:
             super().__init__(f"VK API error: {message}")
         else:
@@ -136,8 +139,9 @@ class VKApi:
     async def call(self, method: str, **params: Any) -> Any:
         payload = await self.call_raw(method, **params)
         if "error" in payload:
-            err = payload["error"] or {}
-            raise VKApiError(err.get("error_code"), err.get("error_msg") or "unknown")
+            err = _safe_error(payload["error"] or {}, self._token)
+            raise VKApiError(err.get("error_code"), err.get("error_msg") or "unknown",
+                             method=method, details=err)
         if "response" in payload:
             return payload["response"]
         return payload
@@ -159,12 +163,13 @@ class VKApi:
         """
         payload = await self.call_raw("execute", code=code)
         if "error" in payload:
-            err = payload["error"] or {}
-            raise VKApiError(err.get("error_code"), err.get("error_msg") or "unknown")
+            err = _safe_error(payload["error"] or {}, self._token)
+            raise VKApiError(err.get("error_code"), err.get("error_msg") or "unknown",
+                             method="execute", details=err)
         errors = payload.get("execute_errors") or []
         if not isinstance(errors, list):
             errors = []
-        return payload.get("response"), [e for e in errors if isinstance(e, dict)]
+        return payload.get("response"), [_safe_error(e, self._token) for e in errors if isinstance(e, dict)]
 
     async def users_get(
         self,
@@ -185,6 +190,19 @@ class VKApi:
             ct = resp.headers.get("Content-Type")
             data = await resp.read()
         return data, ct
+
+
+def _safe_error(value: Any, token: str) -> Any:
+    sensitive = {"access_token", "client_secret", "password", "refresh_token"}
+    if isinstance(value, dict):
+        return {k: "<redacted>" if k.lower() in sensitive or (
+                    k == "value" and str(value.get("key", "")).lower() in sensitive
+                ) else _safe_error(v, token) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_safe_error(item, token) for item in value]
+    if isinstance(value, str) and token:
+        return value.replace(token, "<redacted>")
+    return value
 
 
 def _redact_body(body: dict[str, Any]) -> dict[str, Any]:

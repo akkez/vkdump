@@ -48,16 +48,7 @@ def _last_save_chat_chat() -> str | None:
 
 
 def _save_chat_open_path(result: dict) -> str | None:
-    """Point the GUI's "Open output" button at the top-level index.html
-    save-chat writes — landing page that lists every exported chat.
-
-    When the run rendered a single chat (i.e. not "All chats" mode),
-    append a `#chat-<id>` fragment so the browser scrolls to and
-    highlights the freshly-exported row. The fragment is parsed out
-    in ``task_panel._on_open_output`` so the file URI is built cleanly.
-    Using the numeric chats.id (not the slug) keeps the anchor stable
-    if the chat is later renamed and re-exported under a new slug.
-    """
+    """Open the export menu or the selected chat's row in the dialog list."""
     if not isinstance(result, dict):
         return None
     out = result.get("output_dir")
@@ -69,6 +60,9 @@ def _save_chat_open_path(result: dict) -> str | None:
         return None
     chat_id = result.get("chat_id")
     if chat_id:
+        dialogs = Path(out) / "messages" / "index-messages.html"
+        if dialogs.is_file():
+            p = dialogs
         return f"{p}#chat-{chat_id}"
     return str(p)
 
@@ -89,28 +83,29 @@ def _chat_scope_choices() -> list[tuple[str, str]]:
     from ..core import app_config
     from ..core.db import connection
     out: list[tuple[str, str]] = [("", "All chats")]
-    active = app_config.get("active_account_id") or ""
+    from ..core.message_store import active_account_pk
+    active = active_account_pk()
     try:
         with connection() as conn:
             if active:
                 rows = conn.execute(
                     """
-                    SELECT id, peer_id, account_id, title, type, message_count
-                      FROM chats
+                    SELECT c.id, c.peer_id, a.vk_id AS account_id, c.title, c.type, c.message_count
+                      FROM chats c LEFT JOIN accounts a ON a.id=c.account_id
                      WHERE peer_id IS NOT NULL AND peer_id != ''
-                       AND account_id = ?
-                     ORDER BY message_count DESC, id
+                       AND c.account_id = ?
+                     ORDER BY c.message_count DESC, c.id
                      LIMIT 500
                     """,
-                    (str(active),),
+                    (active,),
                 ).fetchall()
             else:
                 rows = conn.execute(
                     """
-                    SELECT id, peer_id, account_id, title, type, message_count
-                      FROM chats
+                    SELECT c.id, c.peer_id, a.vk_id AS account_id, c.title, c.type, c.message_count
+                      FROM chats c LEFT JOIN accounts a ON a.id=c.account_id
                      WHERE peer_id IS NOT NULL AND peer_id != ''
-                     ORDER BY message_count DESC, id
+                     ORDER BY c.message_count DESC, c.id
                      LIMIT 500
                     """
                 ).fetchall()
@@ -288,16 +283,15 @@ TASKS: list[TaskSpec] = [
         name="save-chat",
         title="Save chat",
         description=(
-            "Render one chat's original HTML into a portable folder, with"
-            " locally-downloaded photos inlined alongside the original"
-            " links. Re-export updates the same output dir's index in place."
+            "Export messages and local attachments as portable HTML from the database or original archive."
         ),
         params=[
             ParamSpec(
                 name="source",
                 type="path_any",
                 label="Dump source",
-                help="Same VK dump you fed to parse-dump (ZIP or extracted folder).",
+                help="Optional original VK archive (ZIP or folder). Leave empty to export from the database.",
+                required=False,
                 default_provider=_last_save_chat_source,
             ),
             ParamSpec(
@@ -316,6 +310,11 @@ TASKS: list[TaskSpec] = [
                 label="Output folder",
                 help="Folder where the per-chat subfolder + index.html will live. Reused across runs.",
                 default_provider=_last_save_chat_output,
+            ),
+            ParamSpec(
+                name="language", type="choice", label="HTML language", required=False,
+                default="en", choices=[("en", "English"), ("ru", "Русский")],
+                default_provider=_remember("save_chat.last_language"),
             ),
         ],
         run=save_chat.run,

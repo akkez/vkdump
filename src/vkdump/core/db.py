@@ -4,12 +4,21 @@ import threading
 import time
 import traceback
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
 from loguru import logger
 
 from .settings import get_settings
+
+
+def _timestamp(raw: bytes) -> datetime:
+    value = datetime.fromisoformat(raw.decode('utf-8'))
+    return value.astimezone(timezone.utc).replace(tzinfo=None) if value.tzinfo else value
+
+
+sqlite3.register_converter('TIMESTAMP', _timestamp)
 
 
 # ---------- optional per-call SQL tracing ----------

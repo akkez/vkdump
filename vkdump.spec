@@ -15,7 +15,8 @@ for kind in ("gui", "cli"):
         continue
     gui = kind == "gui"
     name = "vkdump" if gui else "vkdump-cli"
-    data = [(str(root / "migrations"), "migrations")]
+    data = [(str(root / "migrations"), "migrations"),
+            (str(root / "src/vkdump/modules/save_chat/templates"), "vkdump/modules/save_chat/templates")]
     if gui:
         data.append((str(root / "assets"), "assets"))
     analysis = Analysis(

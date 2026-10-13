@@ -268,28 +268,13 @@ def fetch_data_cmd(
 
 @app.command("save-chat")
 def save_chat_cmd(
-    source: Annotated[
-        Path,
-        typer.Argument(
-            help="The same VK dump (ZIP or extracted) you fed to parse-dump.",
-        ),
-    ],
-    output: Annotated[
-        Path,
-        typer.Option(
-            "--output", "-o",
-            help="Folder where per-chat subfolders + index.html will live. Reused across runs.",
-        ),
-    ],
-    chat: Annotated[
-        str,
-        typer.Argument(
-            help="`chats.id` of the chat to render. Omit (or pass an empty string) to render every chat in the DB.",
-        ),
-    ] = "",
+    output: Annotated[Path, typer.Option("--output", "-o", help="Output folder for portable HTML.")],
+    source: Annotated[Path | None, typer.Argument(help="Optional original VK dump (ZIP or folder).")]=None,
+    chat: Annotated[str, typer.Argument(help="Optional chats.id; omit to export all chats.")]="",
+    language: Annotated[str, typer.Option("--language", help="HTML language: ru or en.")]="en",
 ) -> None:
-    """Render chat(s) HTML with locally-downloaded photos inlined."""
-    _run("save-chat", {"source": source, "chat": chat, "output": output})
+    """Export chat(s) from the database or original archive."""
+    _run("save-chat", {"source": source, "chat": chat, "output": output, "language": language})
 
 
 @db_app.command("migrate")

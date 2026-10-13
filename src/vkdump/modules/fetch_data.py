@@ -38,6 +38,7 @@ from loguru import logger
 from ..core.api_store import persist_messages as _persist_batch
 from ..core import app_config
 from ..core.db import connection
+from ..core.message_store import account_pk
 from ..core.progress import Cancelled, ProgressReporter, Throttle
 from ..core.rate_limiter import RateLimiter
 from ..core.throughput import Throughput
@@ -407,7 +408,7 @@ def _count_eligible_messages(vk_account_id_text: str) -> int:
                     )
                )
             """,
-            (vk_account_id_text,),
+            (account_pk(vk_account_id_text),),
         ).fetchone()
     return int(row["n"]) if row else 0
 
@@ -455,7 +456,7 @@ def _iter_pending_chunks(
                  ORDER BY m.id ASC
                  LIMIT ?
                 """,
-                (vk_account_id_text, last_id, _SCAN_CHUNK),
+                (account_pk, last_id, _SCAN_CHUNK),
             ).fetchall()
         if not rows:
             return

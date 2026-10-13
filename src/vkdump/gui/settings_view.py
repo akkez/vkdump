@@ -55,7 +55,7 @@ def _account_choices() -> list[tuple[str, str]]:
                   FROM accounts a
                   LEFT JOIN chats c
                     ON c.provider = a.provider
-                   AND c.account_id = CAST(a.vk_id AS TEXT)
+                   AND c.account_id = a.id
                  WHERE a.provider = 'vk'
                  GROUP BY a.id
                  ORDER BY total_msgs DESC, a.vk_id

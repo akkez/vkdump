@@ -211,6 +211,9 @@ def _save_dialogs(account_pk, items, response, discovery_id):
     profiles = {int(p["id"]): p for p in response.get("profiles", [])}
     groups = {-int(g["id"]): g for g in response.get("groups", [])}
     with connection() as conn:
+        from ..core.message_store import upsert_chat
+        from ..parsers.vk.api import save_profiles
+        save_profiles(conn,response)
         for item in items:
             conv = item["conversation"]
             peer = conv["peer"]
@@ -221,6 +224,8 @@ def _save_dialogs(account_pk, items, response, discovery_id):
                 title = identity.get("name") or " ".join(
                     identity.get(k, "") for k in ("first_name", "last_name")
                 ).strip()
+            upsert_chat(conn,account_pk,peer_id,title=title,
+                        type_={'chat':'group_chat','group':'community','user':'dm'}.get(peer['type'],peer['type']))
             last = item.get("last_message") or {}
             conn.execute(
                 "INSERT INTO api_dialogs (account_id, peer_id, peer_type, title, "
@@ -255,7 +260,7 @@ def _save_page(account_pk, job, response, expected):
     if (any(type(mid) is not int for mid in ids) or len(set(ids)) != len(ids)
             or any(m.get("peer_id") != peer_id for m in items)):
         raise RuntimeError(f"Invalid message identity in history for peer {peer_id}.")
-    persist_messages(account_pk, items)
+    persist_messages(account_pk, items, response)
     if len(items) != expected:
         raise RuntimeError(f"Incomplete history for peer {peer_id}, offset {job['offset']}: "
                            f"expected {expected}, received {len(items)}. Run again to rescan.")
@@ -345,6 +350,8 @@ async def _run_async(account_pk, vk_id, token, threads, per_request, progress):
                         "UPDATE api_dialogs SET message_count=?, history_anchor_id=?, history_status='pending' "
                         "WHERE account_id=? AND peer_id=?", (count, anchor, account_pk, job["peer_id"]),
                     )
+                with connection() as conn:
+                    conn.execute("UPDATE chats SET total_expected_count=?,history_status='partial' WHERE account_id=? AND peer_id=?",(count,account_pk,str(job['peer_id'])))
                 _save_page(account_pk, job, response, min(PAGE_SIZE, count))
                 fetched += len(items)
                 counted += 1
@@ -385,15 +392,20 @@ async def _run_async(account_pk, vk_id, token, threads, per_request, progress):
             with connection() as conn:
                 conn.execute("UPDATE api_dialogs SET history_status='complete' "
                              "WHERE account_id=? AND discovery_id=?", (account_pk, discovery_id))
+                conn.execute("UPDATE chats SET history_status=CASE WHEN message_count >= total_expected_count THEN 'complete' ELSE 'partial' END WHERE account_id=? AND peer_id IN (SELECT CAST(peer_id AS TEXT) FROM api_dialogs WHERE account_id=? AND discovery_id=?)",(account_pk,account_pk,discovery_id))
+                conn.execute("DELETE FROM chat_data_issues WHERE source='api' AND field='history' AND chat_id IN (SELECT id FROM chats WHERE account_id=? AND history_status='complete')",(account_pk,))
+                flagged = conn.execute("SELECT COUNT(*) FROM chat_data_issues i JOIN chats c ON c.id=i.chat_id WHERE c.account_id=?",(account_pk,)).fetchone()[0]
             progress.report(total, total, f"Done: {dialogs} conversations, {total} messages")
             _log(progress, "complete", dialogs=dialogs, messages=total, fetched=fetched)
-            return {"dialogs": dialogs, "messages": total, "fetched": fetched}
+            return {"dialogs": dialogs, "messages": total, "fetched": fetched, "flagged_fields": flagged}
     except Cancelled:
         _log(progress, "cancelled", fetched=fetched, checkpoints="saved")
         raise
     except Exception as exc:
         _log(progress, "error", phase="download-messages", error=str(exc),
              fetched=fetched, checkpoints="saved")
+        with connection() as conn:
+            conn.execute("INSERT OR REPLACE INTO chat_data_issues(chat_id,vk_message_id,source,field,reason) SELECT c.id,0,'api','history','history_unavailable' FROM chats c JOIN api_dialogs d ON d.account_id=c.account_id AND CAST(d.peer_id AS TEXT)=c.peer_id WHERE d.account_id=? AND d.discovery_id=? AND d.history_status!='complete'",(account_pk,discovery_id))
         raise
     finally:
         stop.set()

@@ -29,6 +29,9 @@ from typing import Callable, Iterable
 from loguru import logger
 
 from ..core.db import connection
+from ..core.message_store import account_pk, upsert_chat, write_messages
+from zoneinfo import ZoneInfo
+from datetime import timezone
 from ..core.deleted_labels import DeletedLabelPicker, format_combined_label
 from ..core.i18n import plural as _plural
 from ..core.progress import ProgressReporter, Throttle
@@ -287,6 +290,7 @@ def _run_with_discovery(
                         index_entry=index_entry,
                         account_id=account_id,
                         on_page_done=_on_page_done,
+                        source_timezone=source_tz,
                     )
                     total_messages += summary["parsed_messages"]
                     total_errors += summary["errors"]
@@ -314,6 +318,7 @@ def _run_with_discovery(
                 chat_name=chat_name,
                 index_entry=indexed_entries.get(chat_name),
                 account_id=account_id,
+                source_timezone=source_tz,
             )
             total_messages += summary["parsed_messages"]
             total_errors += summary["errors"]
@@ -686,29 +691,10 @@ def _preload_chats_from_index(
     fallback when we couldn't resolve it from profile / index jd).
     """
     with connection() as conn:
+        owner = account_pk(account_id, conn, create=True)
         for e in entries:
-            chat_type = chat_type_for_peer(e.peer_folder, e.peer_id)
-            conn.execute(
-                """
-                INSERT INTO chats (
-                    provider, account_id, source_folder, title,
-                    peer_id, type
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT (provider, account_id, source_folder) DO UPDATE SET
-                    title = COALESCE(excluded.title, chats.title),
-                    peer_id = COALESCE(excluded.peer_id, chats.peer_id),
-                    type = COALESCE(excluded.type, chats.type)
-                """,
-                (
-                    PROVIDER,
-                    account_id,
-                    e.peer_folder,
-                    e.title,
-                    str(e.peer_id) if e.peer_id is not None else None,
-                    chat_type,
-                ),
-            )
+            upsert_chat(conn, owner, e.peer_id, title=e.title,
+                        type_=chat_type_for_peer(e.peer_folder,e.peer_id), source_folder=e.peer_folder)
 
 
 # ---------- per-chat ----------
@@ -723,6 +709,7 @@ def _parse_one_chat(
     index_entry: ChatIndexEntry | None,
     account_id: str,
     on_page_done: "Callable[[], None] | None" = None,
+    source_timezone: str = "UTC",
 ) -> dict:
     if not pages:
         return {
@@ -778,6 +765,7 @@ def _parse_one_chat(
                 conn.commit()
                 continue
 
+            _normalize_times(messages, source_timezone)
             inserted = _insert_messages_conn(
                 conn,
                 chat_id=chat_id,
@@ -796,7 +784,7 @@ def _parse_one_chat(
             errors += len(parse_errors)
 
             _bump_chat_progress_conn(
-                conn, chat_id, delta_messages=inserted, delta_errors=len(parse_errors)
+                conn, chat_id, delta_messages=0, delta_errors=len(parse_errors)
             )
             conn.commit()
             if chat_throttle(page_idx, page_count):
@@ -829,6 +817,7 @@ def _parse_single_page(
     chat_name: str,
     index_entry: ChatIndexEntry | None,
     account_id: str,
+    source_timezone: str = "UTC",
 ) -> dict:
     """Parse one stand-alone messagesN.html page. Chat row is upserted using
     metadata read from the page; counters reflect only what this page
@@ -867,6 +856,7 @@ def _parse_single_page(
                 "errors": 1,
             }
 
+        _normalize_times(messages, source_timezone)
         inserted = _insert_messages_conn(
             conn, chat_id=chat_id, account_id=effective_account_id, messages=messages
         )
@@ -878,7 +868,7 @@ def _parse_single_page(
                 errors=parse_errors,
             )
         _bump_chat_progress_conn(
-            conn, chat_id, delta_messages=inserted, delta_errors=len(parse_errors)
+            conn, chat_id, delta_messages=0, delta_errors=len(parse_errors)
         )
     _finalize_chat(chat_id=chat_id)
     return {
@@ -963,46 +953,9 @@ def _upsert_chat(
     chat_type = chat_type_for_peer(peer_folder_name, peer_int)
 
     with connection() as conn:
-        row = conn.execute(
-            """
-            INSERT INTO chats (
-                provider, account_id, source_folder, title,
-                total_expected_count, peer_id, type
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (provider, account_id, source_folder) DO UPDATE SET
-                title = COALESCE(excluded.title, chats.title),
-                total_expected_count = COALESCE(excluded.total_expected_count, chats.total_expected_count),
-                peer_id = COALESCE(excluded.peer_id, chats.peer_id),
-                type = COALESCE(excluded.type, chats.type)
-            RETURNING id
-            """,
-            (
-                PROVIDER,
-                account_id,
-                meta.source_folder,
-                title,
-                meta.total_expected_count,
-                peer_id,
-                chat_type,
-            ),
-        ).fetchone()
-        chat_id = int(row["id"])
-
-        # Sweep up any leftover account_id='' stub from an older run
-        # that pre-loaded before we could resolve the owner.
-        if account_id:
-            conn.execute(
-                """
-                DELETE FROM chats
-                 WHERE provider = ?
-                   AND account_id = ''
-                   AND source_folder = ?
-                   AND id != ?
-                """,
-                (PROVIDER, meta.source_folder, chat_id),
-            )
-        return chat_id
+        owner = account_pk(account_id, conn, create=True)
+        return upsert_chat(conn,owner,peer_id,title=title,type_=chat_type,
+                           source_folder=meta.source_folder,expected=meta.total_expected_count)
 
 
 def _truncate_parse_errors_for(source_folders: list[str]) -> None:
@@ -1091,6 +1044,15 @@ def _resolve_sender(
     return _upsert_user_full(conn, vk_id, m.sender_display_name), vk_id
 
 
+def _normalize_times(messages, source_timezone):
+    zone = ZoneInfo(source_timezone)
+    for m in messages:
+        for field in ("sent_at", "edited_at"):
+            value = getattr(m,field)
+            if value is not None:
+                setattr(m,field,value.replace(tzinfo=zone).astimezone(timezone.utc).replace(tzinfo=None))
+
+
 def _insert_messages_conn(
     conn: sqlite3.Connection,
     chat_id: int,
@@ -1101,68 +1063,7 @@ def _insert_messages_conn(
     connection. Caller owns commit / rollback. Returns count of *newly
     inserted* messages.
     """
-    inserted = 0
-    account_vk_id: int | None = int(account_id) if account_id.isdigit() else None
-    for m in messages:
-            user_id, resolved_vk_id = _resolve_sender(conn, m, account_vk_id)
-            # Skip storing raw_html when the parser captured every field
-            # losslessly — the SQLite row is then a complete representation
-            # on its own and the duplicate HTML would just bloat the store.
-            persisted_raw = None if m.fully_parsed else m.raw_html
-            cur = conn.execute(
-                """
-                INSERT OR IGNORE INTO messages (
-                    provider, account_id, chat_id, vk_message_id,
-                    sender_user_id, sender_vk_id, sender_display_name, sender_is_self,
-                    sent_at, text, has_forwards, forwarded_count,
-                    is_reply, reply_to_message_id, attachment_count,
-                    is_edited, edited_at,
-                    source_file, raw_html
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    PROVIDER,
-                    account_id,
-                    chat_id,
-                    m.vk_message_id,
-                    user_id,
-                    resolved_vk_id,
-                    m.sender_display_name,
-                    1 if m.sender_is_self else 0,
-                    m.sent_at,
-                    m.text,
-                    1 if m.has_forwards else 0,
-                    m.forwarded_count,
-                    1 if m.is_reply else 0,
-                    m.reply_to_message_id,
-                    len(m.attachments),
-                    1 if m.is_edited else 0,
-                    m.edited_at,
-                    m.source_file,
-                    persisted_raw,
-                ),
-            )
-            if cur.rowcount == 1 and cur.lastrowid:
-                message_pk = cur.lastrowid
-                inserted += 1
-                for a in m.attachments:
-                    conn.execute(
-                        """
-                        INSERT INTO attachments
-                            (message_id, kind, description, url, forward_count, position, data_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            message_pk,
-                            a.kind,
-                            a.description,
-                            a.url,
-                            a.forward_count,
-                            a.position,
-                            json.dumps(a.data, ensure_ascii=False) if a.data else None,
-                        ),
-                    )
-    return inserted
+    return write_messages(conn, chat_id, messages)
 
 
 def _insert_parse_errors_conn(

@@ -65,7 +65,7 @@ from .models import (
 
 VK_DUMP_ENCODING = "windows-1251"
 
-_MSG_OPEN_RE = re.compile(r'<div class="message" data-id="(?P<id>\d+)">')
+_MSG_OPEN_RE = re.compile(r'<div\b(?=[^>]*\bclass="message")(?=[^>]*\bdata-id="(?P<id>\d+)")[^>]*>')
 _HEADER_RE = re.compile(
     r'<div class="message__header">(?P<header>.*?)</div>', re.DOTALL
 )
@@ -198,7 +198,10 @@ _PAGINATION_LAST_RE = re.compile(r'href="messages(\d+)\.html"')
 
 def decode_dump_bytes(data: bytes) -> str:
     """Decode raw HTML bytes using the encoding declared in the dump."""
-    return data.decode(VK_DUMP_ENCODING)
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return data.decode(VK_DUMP_ENCODING)
 
 
 def read_page(source: Source, rel: str) -> str:
@@ -357,7 +360,7 @@ def _parse_one_message(
     )
     fully_parsed = (
         all(a.kind != KIND_UNKNOWN for a in attachments)
-        and not re.search(r"<[A-Za-z]", residue)
+        and not residue.strip()
     )
 
     return ParsedMessage(
@@ -478,6 +481,16 @@ def _parse_attachments(kludges_html: str) -> list[ParsedAttachment]:
         att_inner = kludges_html[m.end():att_close]
         desc_m = _ATTACHMENT_DESC_RE.search(att_inner)
         if not desc_m:
+            image = re.search(r'<img\b[^>]*src="([^"]+)"[^>]*>', att_inner)
+            if image and 'vkdump-inline-photo' in att_inner:
+                links = re.findall(r'<a\b[^>]*href="(https?://[^"]+)"',att_inner)
+                caption = re.search(r'alt="([^"]*)"',image.group(0))
+                out.append(ParsedAttachment(kind=KIND_PHOTO,description=unescape(caption.group(1)) if caption else None,
+                                            url=unescape(links[0]) if links else None,position=pos,
+                                            data={'source_local_path':unescape(image.group(1))}))
+            else:
+                out.append(ParsedAttachment(kind=KIND_UNKNOWN,description=None,position=pos,data={'raw_html':att_inner}))
+            pos += 1
             continue
         desc_raw = unescape(desc_m.group("desc").strip())
         # Some descriptions embed U+00A0 (NBSP) — normalise to a regular

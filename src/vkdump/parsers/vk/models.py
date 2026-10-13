@@ -44,6 +44,8 @@ class ParsedAttachment:
     url: str | None = None
     forward_count: int | None = None  # only set when kind == KIND_FORWARD
     position: int = 0
+    external_id: str | None = None
+    access_key: str | None = None
     data: dict | None = None  # structured payload (e.g. chat_event); persisted as JSON in data_json
 
 
@@ -69,6 +71,9 @@ class ParsedMessage:
     # in kludges). Callers may drop `raw_html` for these — the parsed row
     # then represents the message losslessly on its own.
     fully_parsed: bool = True
+    conversation_message_id: int | None = None
+    reply_data: dict | None = None
+    source_kind: str = "archive"
 
 
 @dataclass

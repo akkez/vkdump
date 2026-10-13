@@ -730,7 +730,9 @@ class TaskPanel(QWidget):
             self._errors_inflight.cancel()
 
     def _on_finished(self, run_id: int, result: object) -> None:
-        self._status.setText(f"ok — run #{run_id}")
+        flagged = result.get("flagged_fields",0) if isinstance(result,dict) else 0
+        suffix = f" · {flagged} flagged fields" if flagged else ""
+        self._status.setText(f"ok — run #{run_id}{suffix}")
         self._log_buffer.append(f"run #{run_id} completed")
         self._flush_log_buffer()
         self._flush_progress_buffer()
@@ -816,9 +818,13 @@ class TaskPanel(QWidget):
         self._flush_log_buffer()
         self._flush_progress_buffer()
         self._reset_buttons()
+        if self._task.mutates_data:
+            self.data_mutated.emit()
 
     def _on_cancelled(self, run_id: int) -> None:
         self._status.setText(f"cancelled — run #{run_id}")
         self._flush_log_buffer()
         self._flush_progress_buffer()
         self._reset_buttons()
+        if self._task.mutates_data:
+            self.data_mutated.emit()

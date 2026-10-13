@@ -16,7 +16,8 @@ from ..core.progress import ProgressReporter
 
 
 def run(params: dict, progress: ProgressReporter) -> dict:
-    active = (app_config.get("active_account_id") or "").strip() or None
+    from ..core.message_store import active_account_pk
+    active = active_account_pk()
     # SQL fragment + binding tuple, reused per query. Empty string when
     # there is no filter, so we keep one parametrised query shape per
     # rollup instead of two diverging variants.
@@ -154,7 +155,7 @@ def run(params: dict, progress: ProgressReporter) -> dict:
 
     summary = {
         "scope": (
-            {"active_account_id": active} if active else {"active_account_id": None}
+            {"active_account_id": app_config.get("active_account_id")} if active else {"active_account_id": None}
         ),
         "chats": chats_total,
         "users": {"total": users_total, "deleted": users_deleted},

@@ -40,9 +40,10 @@ def _kind_case(prefix: str = "") -> str:
     return ",\n               ".join(parts)
 
 
-def _active_account() -> str | None:
-    a = (app_config.get("active_account_id") or "").strip()
-    return a or None
+def _active_account() -> int | None:
+    from .message_store import active_account_pk
+    return active_account_pk()
+
 
 
 def chats_rollup(min_messages: int = 10) -> tuple[list[dict[str, Any]], int]:

@@ -97,14 +97,20 @@ def _chat_folder_slug(chat_id: int, title: str | None) -> str:
 
 
 def run(params: dict, progress: ProgressReporter) -> dict:
-    source_input = Path(params["source"]).expanduser()
+    source_input = Path(params["source"]).expanduser() if params.get("source") else None
+    from ...core.settings import get_settings
+    lang = params.get("language") or get_settings().language
+    if lang not in ("ru", "en"):
+        raise ValueError("Export language must be ru or en.")
     chat_pick = str(params.get("chat") or "").strip()
     output_input = Path(params["output"]).expanduser()
     output_dir = output_input.resolve()
 
     # Remember inputs so the next save-chat run pre-fills them.
     try:
-        cfg_set("save_chat.last_source", str(source_input.resolve()))
+        if source_input:
+            cfg_set("save_chat.last_source", str(source_input.resolve()))
+        cfg_set("save_chat.last_language", lang)
         cfg_set("save_chat.last_output", str(output_dir))
         cfg_set("save_chat.last_chat", chat_pick)
     except Exception:  # noqa: BLE001
@@ -123,13 +129,17 @@ def run(params: dict, progress: ProgressReporter) -> dict:
         chat_metas = _lookup_all_chats()
         if not chat_metas:
             raise ValueError(
-                "No chats with messages in the DB — parse-dump first."
+                "No chats in the DB — import an archive or download messages first."
             )
         progress.log(
             f"save-chat: 'All chats' mode — {len(chat_metas)} candidate chats"
         )
 
-    discovery = discover(source_input)
+    needs_archive = any(meta.get('source_folder') and not meta.get('has_api_messages') for meta in chat_metas)
+    discovery = discover(source_input) if needs_archive and source_input and source_input.exists() else None
+    if source_input and not source_input.exists():
+        for meta in chat_metas:
+            meta['export_issues'] = [{'code':'original_archive_not_found','field':'source'}]
     try:
         if chat_pick:
             # Specific chat — propagate errors so the user sees them
@@ -139,15 +149,20 @@ def run(params: dict, progress: ProgressReporter) -> dict:
                 chat_meta=chat_metas[0],
                 output_dir=output_dir,
                 progress=progress,
+                lang=lang,
+                page_size=params.get("page_size", 50),
             )
         return _render_many(
             discovery=discovery,
             chat_metas=chat_metas,
             output_dir=output_dir,
             progress=progress,
+            lang=lang,
+            page_size=params.get("page_size", 50),
         )
     finally:
-        discovery.source.close()
+        if discovery:
+            discovery.source.close()
 
 
 def _render_many(
@@ -156,6 +171,8 @@ def _render_many(
     chat_metas: list[dict],
     output_dir: Path,
     progress: ProgressReporter,
+    lang: str = "en",
+    page_size: int = 50,
 ) -> dict:
     """Render each chat in turn, swallowing per-chat failures so one bad
     chat (e.g. wrong account, missing folder) doesn't abort the rest.
@@ -174,6 +191,8 @@ def _render_many(
                 chat_meta=chat_meta,
                 output_dir=output_dir,
                 progress=progress,
+                lang=lang,
+                page_size=page_size,
             )
             rendered.append(r)
         except Exception as exc:  # noqa: BLE001
@@ -207,6 +226,7 @@ def _render_many(
         "photo_inlined": photo_inlined,
         "photo_unique_files": photo_unique,
         "photos_count": photos_count,
+        "flagged_fields": sum(r.get("flagged_fields",0) for r in rendered),
         "per_chat": [
             {
                 "chat_slug": r.get("chat_slug"),
@@ -214,6 +234,8 @@ def _render_many(
                 "pages": r.get("pages"),
                 "photo_inlined": r.get("photo_inlined"),
                 "photo_mentions": r.get("photo_mentions"),
+                "flagged_fields": r.get("flagged_fields",0),
+                "issues_report": r.get("issues_report"),
             }
             for r in rendered
         ],
@@ -269,7 +291,7 @@ def _assert_dump_matches_chat(source, first_page_rel: str, chat_meta: dict) -> N
         ) from exc
     meta = parse_chat_meta(html, source_folder=chat_meta["source_folder"])
     dump_account = (meta.account_id or "").strip()
-    db_account = str(chat_meta["account_id"] or "").strip()
+    db_account = str(chat_meta.get("account_vk_id") or "").strip()
     if not dump_account:
         # No meta in the page — let it through with a warning; older
         # exports / partial archives sometimes lack it.
@@ -294,29 +316,17 @@ def _assert_dump_matches_chat(source, first_page_rel: str, chat_meta: dict) -> N
 def _lookup_chat(chat_id: int) -> dict | None:
     with connection() as conn:
         row = conn.execute(
-            "SELECT id, peer_id, account_id, provider, title, type,"
-            " source_folder, message_count"
-            " FROM chats WHERE id = ?",
-            (chat_id,),
-        ).fetchone()
+            "SELECT c.*,a.vk_id AS account_vk_id,EXISTS(SELECT 1 FROM messages m WHERE m.chat_id=c.id AND m.source_kind IN ('api','mixed')) AS has_api_messages "
+            "FROM chats c LEFT JOIN accounts a ON a.id=c.account_id WHERE c.id=?",(chat_id,)).fetchone()
     return dict(row) if row else None
 
 
 def _lookup_all_chats() -> list[dict]:
-    """Every chat with at least one parsed message. Ordered by
-    message_count desc so a partial run renders the biggest chats first.
-    Empty / vanity-slug `peer_id` chats are still included — the renderer
-    keys off `source_folder`, not peer_id, when locating pages.
-    """
+    from ...core.message_store import active_account_pk
+    active = active_account_pk()
     with connection() as conn:
-        rows = conn.execute(
-            "SELECT id, peer_id, account_id, provider, title, type,"
-            " source_folder, message_count"
-            " FROM chats"
-            " WHERE message_count > 0"
-            " ORDER BY message_count DESC, id"
-        ).fetchall()
-    return [dict(r) for r in rows]
+        ids = [r[0] for r in conn.execute("SELECT id FROM chats WHERE (? IS NULL OR account_id=?) ORDER BY message_count DESC,id",(active,active))]
+    return [_lookup_chat(chat_id) for chat_id in ids]
 
 
 def _build_url_meta(chat_id: int) -> dict[str, AttMeta]:
@@ -348,10 +358,7 @@ def _build_url_meta(chat_id: int) -> dict[str, AttMeta]:
 
 
 def _coerce_account_vk_id(raw: object) -> int | None:
-    """Parse `chats.account_id` (stored as TEXT, holds the dump owner's
-    vk_id) into an int for the self-sender transform. Returns ``None``
-    on missing / non-numeric values so the transform safely no-ops.
-    """
+    """Parse an external account VK ID for the self-sender transform."""
     if raw is None:
         return None
     try:
@@ -401,17 +408,22 @@ def _render_chat(
     chat_meta: dict,
     output_dir: Path,
     progress: ProgressReporter,
+    lang: str = "en",
+    page_size: int = 50,
 ) -> dict:
+    from .generic import render_chat
+    if discovery is None or not chat_meta.get("source_folder") or chat_meta.get("has_api_messages"):
+        return render_chat(chat_meta=chat_meta,output_dir=output_dir,progress=progress,lang=lang,page_size=page_size,extra_issues=chat_meta.get("export_issues",()))
     source = discovery.source
     chat_rel = _find_chat_rel(discovery, chat_meta["source_folder"])
     if chat_rel is None:
-        raise FileNotFoundError(
-            f"Chat folder {chat_meta['source_folder']!r} not found under {source.describe()}"
-        )
+        chat_meta["export_issues"] = [{"code":"original_chat_not_found","field":"source_folder"}]
+        return render_chat(chat_meta=chat_meta,output_dir=output_dir,progress=progress,lang=lang,page_size=page_size,extra_issues=chat_meta.get("export_issues",()))
 
     pages = list_message_pages(source, chat_rel)
     if not pages:
-        raise FileNotFoundError(f"No messagesN.html pages under {chat_rel!r}")
+        chat_meta["export_issues"] = [{"code":"original_chat_not_found","field":"source_folder"}]
+        return render_chat(chat_meta=chat_meta,output_dir=output_dir,progress=progress,lang=lang,page_size=page_size,extra_issues=chat_meta.get("export_issues",()))
 
     # Hard sanity check: the same source_folder name (e.g. "2000000004")
     # can exist under TWO different dumps from TWO different VK
@@ -467,7 +479,7 @@ def _render_chat(
         static_root=static_root,
         url_to_meta=url_to_meta,
         user_names=_build_user_names(),
-        account_vk_id=_coerce_account_vk_id(chat_meta.get("account_id")),
+        account_vk_id=_coerce_account_vk_id(chat_meta.get("account_vk_id")),
         log=progress.log,
     )
 
@@ -568,6 +580,8 @@ def _render_chat(
         photos_page=photos_page_name or "",
         photos_count=photos_count,
     )
+    from .generic import write_indexes
+    write_indexes(output_dir, manifest, lang)
     progress.log(
         f"save-chat: wrote {chat_out} · index now lists {plural(len(manifest.chats), 'chat')}"
     )

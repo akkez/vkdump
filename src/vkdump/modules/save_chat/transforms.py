@@ -81,6 +81,28 @@ def _build_alt(description: str | None, meta: AttMeta) -> str:
     return " ".join(parts)
 
 
+def inline_photo_html(asset_href: str, description: str | None, meta: AttMeta, url: str | None = None) -> str:
+    label = _build_alt(description, meta)
+    alt = html_escape(label, quote=True)
+    caption = html_escape(label, quote=False)
+    href = html_escape(asset_href, quote=True)
+    if url:
+        host = html_escape(urlparse(url).netloc or url, quote=False)
+        caption += (
+            f' · <a href="{html_escape(url, quote=True)}"'
+            f' style="color:#888;text-decoration:underline">{host}</a>'
+        )
+    return (
+        '<div class="vkdump-inline-photo" style="display:block;margin:6px 0">'
+        f'<a href="{href}" title="{alt}" style="display:inline-block">'
+        f'<img loading="lazy" src="{href}" alt="{alt}" title="{alt}"'
+        ' style="display:block;max-width:100%;height:auto">'
+        '</a>'
+        '<div class="vkdump-caption" style="font-size:11px;color:#888;margin-top:2px">'
+        f'{caption}</div></div>'
+    )
+
+
 def _link_re(url: str) -> re.Pattern[str]:
     # The VK dump always writes `<a class="attachment__link" href="...">`
     # with the URL verbatim. Match that exact link and capture an open
@@ -235,40 +257,10 @@ class InlinePhotosTransform:
         full_re = _full_link_re(att.url or "")
         m_full = full_re.match(html, m.start())
 
-        label = _build_alt(att.description, meta)
-        alt = html_escape(label, quote=True)
-        caption = html_escape(label, quote=False)
-        href = html_escape(asset_href, quote=True)
-        # Block-level wrapper with inline styles so we don't depend on
-        # VK's own CSS: VK's description/link siblings are inline, so
-        # without `display:block` the injected image flows mid-sentence.
-        # Margins separate it from surrounding text; max-width contains
-        # wide images within the column.
-        caption_inner = caption
         end = m.start()
         if m_full is not None:
-            host = urlparse(att.url or "").netloc or (att.url or "")
-            url_attr = html_escape(att.url or "", quote=True)
-            host_text = html_escape(host, quote=False)
-            caption_inner = (
-                f'{caption} · '
-                f'<a href="{url_attr}"'
-                ' style="color:#888;text-decoration:underline">'
-                f'{host_text}</a>'
-            )
             end = m_full.end()
-        tag = (
-            '<div class="vkdump-inline-photo"'
-            ' style="display:block;margin:6px 0">'
-            f'<a href="{href}" title="{alt}" style="display:inline-block">'
-            f'<img loading="lazy" src="{href}" alt="{alt}" title="{alt}"'
-            ' style="display:block;max-width:100%;height:auto">'
-            '</a>'
-            f'<div class="vkdump-caption"'
-            ' style="font-size:11px;color:#888;margin-top:2px">'
-            f'{caption_inner}</div>'
-            '</div>'
-        )
+        tag = inline_photo_html(asset_href, att.description, meta, att.url if m_full is not None else None)
         return html[:splice_start] + tag + html[end:]
 
 

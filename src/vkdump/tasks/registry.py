@@ -148,7 +148,7 @@ TASKS: list[TaskSpec] = [
         params=[
             ParamSpec(name="threads", type="int", label="Parallel threads", required=False,
                       minimum=1,
-                      default=fetch_data._EXECUTE_THREADS,
+                      default=download_messages.DEFAULT_THREADS,
                       default_provider=_remember("download_messages.last_threads")),
             ParamSpec(name="per_request", type="int", label="Calls per execute (1..25)",
                       minimum=1, maximum=25,

@@ -94,7 +94,7 @@ class _SourcePage(QWidget):
             layout.addSpacing(24)
             radio.toggled.connect(self.completeChanged)
         layout.addStretch(1)
-        archive_link = QLabel(f"Don't have a copy? <a href='{ARCHIVE_URL}'>Request a VK archive</a>")
+        archive_link = QLabel(f"Don't have a copy? <a style='color:#0000ee' href='{ARCHIVE_URL}'>Request a VK archive</a>")
         self.archive_link = archive_link
         archive_link.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         archive_link.setOpenExternalLinks(True)

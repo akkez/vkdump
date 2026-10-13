@@ -18,11 +18,12 @@ from ..core.progress import Cancelled, ProgressReporter, Throttle
 from ..core.rate_limiter import RateLimiter
 from ..core.vk_api import VKApi, VKApiError, VKApiTimeout
 from .fetch_data import (
-    _EXECUTE_MAX_CALLS, _EXECUTE_THREADS, _MAX_RPS, _TIMEOUT_RETRY_S,
+    _EXECUTE_MAX_CALLS, _MAX_RPS, _TIMEOUT_RETRY_S,
     _cancellation_bridge, _rate_limit_delay, _sleep_until_stop,
 )
 
 PAGE_SIZE = 200
+DEFAULT_THREADS = 5
 DEFAULT_CALLS_PER_EXECUTE = 15
 
 
@@ -37,7 +38,7 @@ def _log(progress: ProgressReporter, event: str, **fields) -> None:
 
 
 def run(params: dict, progress: ProgressReporter) -> dict:
-    threads = int(params.get("threads", _EXECUTE_THREADS))
+    threads = int(params.get("threads", DEFAULT_THREADS))
     per_request = int(params.get("per_request", DEFAULT_CALLS_PER_EXECUTE))
     if threads < 1 or not 1 <= per_request <= _EXECUTE_MAX_CALLS:
         raise ValueError("Threads must be positive; calls per execute must be 1..25.")

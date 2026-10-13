@@ -100,7 +100,7 @@ class MainWindow(QMainWindow):
             self._workspace_geometry = self.geometry()
         self._wizard_mode = True
         self._screens.setCurrentWidget(self._start_view)
-        self._start_view.reset()
+        self._start_view.refresh()
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowMinimizeButtonHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowTitle('VK Dump Wizard')

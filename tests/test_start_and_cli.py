@@ -107,6 +107,26 @@ def test_start_follows_settings_account_and_reauthorization(window):
     assert window._start_view._auth_btn.text() == 'Reauthorize through VK'
 
 
+def test_start_return_preserves_download_context_and_refreshes_account(window):
+    start = window._start_view
+    assert window._download_panel._editors['threads'].value() == 5
+    _go_to_download(start)
+    start._threads.setValue(7)
+    start._calls.setValue(13)
+    window._tabs.setCurrentWidget(window._download_panel)
+    vk_auth.persist('synthetic-token', auth_info())
+    window._tabs.setCurrentIndex(0)
+    assert start._wizard.currentId() == DOWNLOAD
+    assert start._source_page.account.isChecked()
+    assert start._threads.value() == 7
+    assert start._calls.value() == 13
+    assert start._download_btn.isEnabled()
+    assert 'Test Account (id42)' in start._account_label.text()
+    start._wizard.back()
+    assert start._wizard.currentId() == SOURCE
+    assert start._source_page.account.isChecked()
+
+
 def test_wizard_back_can_change_the_route_and_cancel_confirms_exit(window, monkeypatch):
     from vkdump.gui.xp_widgets import XPExitDialog
     start = window._start_view
@@ -170,7 +190,7 @@ def test_wizard_and_exit_dialog_have_no_white_border_gutters(window, qapp):
     dialog.reject()
 
 
-def test_start_morphs_into_workspace_and_back_to_a_fresh_wizard(window, qapp):
+def test_start_morphs_into_workspace_and_back_to_the_same_wizard(window, qapp):
     from PySide6.QtCore import Qt
     from vkdump.gui.start_view import WIZARD_WIDTH, WIZARD_HEIGHT
     window.show()
@@ -198,8 +218,8 @@ def test_start_morphs_into_workspace_and_back_to_a_fresh_wizard(window, qapp):
     qapp.processEvents()
     assert window._wizard_mode
     assert not window._tabs.isVisible()
-    assert window._start_view._wizard.currentId() == WELCOME
-    assert not window._start_view._source_page.archive.isChecked()
+    assert window._start_view._wizard.currentId() == IMPORT
+    assert window._start_view._source_page.archive.isChecked()
     assert (window.width(), window.height()) == (WIZARD_WIDTH, WIZARD_HEIGHT)
     window._tabs.setCurrentWidget(window._import_panel)
     qapp.processEvents()
@@ -289,7 +309,7 @@ def test_cli_download_passes_settings_to_the_shared_task(monkeypatch):
     monkeypatch.setattr(cli, '_run', lambda name, params: tasks.append((name, params)))
     default_result = CliRunner().invoke(cli.app, ['download-messages'])
     assert default_result.exit_code == 0
-    assert tasks.pop() == ('download-messages', {'threads': 4, 'per_request': 15, 'account': None})
+    assert tasks.pop() == ('download-messages', {'threads': 5, 'per_request': 15, 'account': None})
     result = CliRunner().invoke(cli.app, ['download-messages', '--threads', '3', '--per-request', '12', '--account', '42'])
     assert result.exit_code == 0, result.output
     assert tasks == [('download-messages', {'threads': 3, 'per_request': 12, 'account': 42})]

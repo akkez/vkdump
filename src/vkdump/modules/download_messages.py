@@ -23,6 +23,7 @@ from .fetch_data import (
 )
 
 PAGE_SIZE = 200
+DEFAULT_CALLS_PER_EXECUTE = 15
 
 
 def _log(progress: ProgressReporter, event: str, **fields) -> None:
@@ -37,7 +38,7 @@ def _log(progress: ProgressReporter, event: str, **fields) -> None:
 
 def run(params: dict, progress: ProgressReporter) -> dict:
     threads = int(params.get("threads", _EXECUTE_THREADS))
-    per_request = int(params.get("per_request", _EXECUTE_MAX_CALLS))
+    per_request = int(params.get("per_request", DEFAULT_CALLS_PER_EXECUTE))
     if threads < 1 or not 1 <= per_request <= _EXECUTE_MAX_CALLS:
         raise ValueError("Threads must be positive; calls per execute must be 1..25.")
     app_config.set("download_messages.last_threads", str(threads))

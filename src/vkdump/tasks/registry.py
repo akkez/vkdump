@@ -157,7 +157,7 @@ TASKS: list[TaskSpec] = [
                       default_provider=_remember("download_messages.last_threads")),
             ParamSpec(name="per_request", type="int", label="Calls per execute (1..25)",
                       minimum=1, maximum=25,
-                      required=False, default=fetch_data._EXECUTE_MAX_CALLS,
+                      required=False, default=download_messages.DEFAULT_CALLS_PER_EXECUTE,
                       default_provider=_remember("download_messages.last_per_request")),
         ],
         run=download_messages.run,

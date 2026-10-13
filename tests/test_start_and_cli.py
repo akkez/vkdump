@@ -287,6 +287,9 @@ def test_removed_flags_are_unavailable(flag):
 def test_cli_download_passes_settings_to_the_shared_task(monkeypatch):
     tasks = []
     monkeypatch.setattr(cli, '_run', lambda name, params: tasks.append((name, params)))
+    default_result = CliRunner().invoke(cli.app, ['download-messages'])
+    assert default_result.exit_code == 0
+    assert tasks.pop() == ('download-messages', {'threads': 4, 'per_request': 15, 'account': None})
     result = CliRunner().invoke(cli.app, ['download-messages', '--threads', '3', '--per-request', '12', '--account', '42'])
     assert result.exit_code == 0, result.output
     assert tasks == [('download-messages', {'threads': 3, 'per_request': 12, 'account': 42})]

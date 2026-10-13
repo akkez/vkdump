@@ -71,7 +71,7 @@ def download_messages_cmd(
     threads: Annotated[int, typer.Option("--threads", "-t", min=1,
                                        help="Parallel execute requests.")] = 4,
     per_request: Annotated[int, typer.Option("--per-request", "-p", min=1, max=25,
-                                           help="History calls per execute.")] = 25,
+                                           help="History calls per execute.")] = 15,
     account: Annotated[int | None, typer.Option("--account", min=1,
                                                help="VK user ID; defaults to the active account.")] = None,
 ) -> None:

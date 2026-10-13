@@ -24,7 +24,7 @@ for kind in ("gui", "cli"):
         pathex=[str(root / "src")],
         binaries=[],
         datas=data,
-        hiddenimports=[],
+        hiddenimports=["tzdata"],
         hookspath=[],
         runtime_hooks=[],
         excludes=[] if gui else ["PySide6", "shiboken6"],

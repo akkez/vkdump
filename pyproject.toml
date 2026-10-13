@@ -11,6 +11,7 @@ dependencies = [
     "loguru>=0.7",
     "aiohttp>=3.10",
     "certifi>=2026.5.20",
+    "tzdata",
 ]
 
 [project.optional-dependencies]

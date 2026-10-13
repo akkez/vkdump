@@ -29,7 +29,7 @@ def main() -> None:
 
   depends_on macos: :sonoma
 
-  app "VKdump.app"
+  app "vkdump-v#{{version}}/VKdump.app"
 
   postflight_steps do
     run "/usr/bin/xattr",

@@ -86,7 +86,7 @@ def assert_portable(output):
             assert target.is_relative_to(output.resolve()),link
             assert target.is_file(),link
             if url.fragment and target.suffix=='.html':
-                destination=Links();destination.feed(target.read_text())
+                destination=Links();destination.feed(target.read_text(encoding='utf-8'))
                 assert url.fragment in destination.ids,link
 
 
@@ -142,7 +142,7 @@ def test_download_to_save_chat_task_is_portable_html(store,monkeypatch,tmp_path,
     result=outcome.result
     assert result['renderer']=='database' and result['pages']==2 and result['blocks']==205
     first=Path(result['chat_dir'])/'messages'/'messages0.html'
-    html=first.read_text()
+    html=first.read_text(encoding='utf-8')
     assert f'<html lang="{lang}">' in html and label in html and edited in html
     assert '&lt;script&gt;' in html and '<script>' not in html
     assert 'messages200.html#m1' in html
@@ -151,19 +151,19 @@ def test_download_to_save_chat_task_is_portable_html(store,monkeypatch,tmp_path,
     assert '<img loading="lazy" src="../assets/' in html
     assert not any(x in html for x in ('⚠','Файл не скачан','File not downloaded','Файл вложения недоступен','date-divider',' · UTC','class="status"','class="empty"'))
     assert 'raw-secret' not in html
-    issues=json.loads(Path(result['issues_report']).read_text())['issues']
+    issues=json.loads(Path(result['issues_report']).read_text(encoding='utf-8'))['issues']
     assert any(i['code']=='unknown_attachment' for i in issues)
     assert any(i['code']=='missing_file' for i in issues)
     assert not any(i['code']=='reply_target_unavailable' for i in issues)
     for file in (output/'index.html',output/'messages'/'index-messages.html'):
-        text=file.read_text()
+        text=file.read_text(encoding='utf-8')
         assert label in text
         assert not any(x in text for x in ('likes','profile/','Friends','Друзья','payments','Лайки'))
     moved=tmp_path/'moved';shutil.copytree(output,moved)
     assert_portable(moved)
     again=save_chat.run({'chat':str(chat['id']),'output':output,'language':lang,'page_size':200},Reporter())
     assert again['pages']==2
-    assert len(json.loads((output/'_export.json').read_text())['chats'])==1
+    assert len(json.loads((output/'_export.json').read_text(encoding='utf-8'))['chats'])==1
 
 
 def archive_html(owner,mid=1,body='Архивный текст',charset='utf-8'):
@@ -206,7 +206,7 @@ def test_overlapping_sources_share_identity_and_accounts_stay_separate(store,mon
         assert conn.execute('SELECT COUNT(*) FROM messages').fetchone()[0]==2
     result=save_chat.run({'source':archive,'chat':str(chat_id),'output':tmp_path/'out','language':'ru'},Reporter())
     assert result['renderer']=='database'
-    html=(Path(result['chat_dir'])/'messages'/'messages0.html').read_text()
+    html=(Path(result['chat_dir'])/'messages'/'messages0.html').read_text(encoding='utf-8')
     assert 'Архивный текст' in html and 'forward' in html
     assert_portable(tmp_path/'out')
 
@@ -218,7 +218,7 @@ def test_archive_path_still_exports_original_cp1251_as_utf8(store,tmp_path):
         chat_id=conn.execute('SELECT id FROM chats').fetchone()[0]
     result=save_chat.run({'source':archive,'chat':str(chat_id),'output':tmp_path/'out'},Reporter())
     assert result.get('renderer') is None
-    html=(Path(result['chat_dir'])/'messages'/'messages0.html').read_text()
+    html=(Path(result['chat_dir'])/'messages'/'messages0.html').read_text(encoding='utf-8')
     assert 'Архивный текст' in html and 'windows-1251' not in html
     assert '<meta charset="utf-8">' in html
     assert (tmp_path/'out'/'style.css').is_file()
@@ -231,16 +231,16 @@ def test_empty_partial_missing_and_unparsed_fields_are_flagged(store,tmp_path):
                       sender_display_name=None,sender_is_self=False,text='?',is_reply=True,reply_to_message_id=999,
                       raw_html='<div>unparsed</div>',fully_parsed=False)])
     result=save_chat.run({'source':tmp_path/'missing','chat':str(chat_id),'output':tmp_path/'out','language':'ru'},Reporter())
-    codes={i['code'] for i in json.loads(Path(result['issues_report']).read_text())['issues']}
+    codes={i['code'] for i in json.loads(Path(result['issues_report']).read_text(encoding='utf-8'))['issues']}
     assert {'missing_sender','missing_author_name','missing_peer_id','reply_target_unavailable','unparsed_html','original_archive_not_found'} <= codes
-    html=(Path(result['chat_dir'])/'messages'/'messages0.html').read_text()
+    html=(Path(result['chat_dir'])/'messages'/'messages0.html').read_text(encoding='utf-8')
     assert '<!--' in html and 'partial_history' in html
     assert 'Неполная история' not in html and 'Сообщение недоступно' not in html
     with db.connection() as conn:
         empty=upsert_chat(conn,1,99,title='Empty')
     result=save_chat.run({'chat':str(empty),'output':tmp_path/'empty','language':'en'},Reporter())
     assert result['pages']==1 and result['blocks']==0
-    html=(Path(result['chat_dir'])/'messages'/'messages0.html').read_text()
+    html=(Path(result['chat_dir'])/'messages'/'messages0.html').read_text(encoding='utf-8')
     assert 'empty_history' in html and 'No messages' not in html
     with pytest.raises(ValueError,match='No chat in DB'):
         save_chat.run({'chat':'9999','output':tmp_path/'bad'},Reporter())
@@ -254,7 +254,7 @@ def test_missing_api_timestamp_is_flagged_without_fake_message(store,tmp_path):
         chat_id=conn.execute('SELECT id FROM chats').fetchone()[0]
     result=save_chat.run({'chat':str(chat_id),'output':tmp_path/'out'},Reporter())
     assert result['flagged_fields']==1
-    assert json.loads(Path(result['issues_report']).read_text())['issues'][0]['code']=='missing_timestamp'
+    assert json.loads(Path(result['issues_report']).read_text(encoding='utf-8'))['issues'][0]['code']=='missing_timestamp'
 
 
 def test_newer_edits_preserve_downloads_and_remove_deleted_attachments(store):
@@ -327,7 +327,7 @@ def test_api_unknown_fields_and_timestamp_conflict_are_reported(store,tmp_path):
     with db.connection() as conn:
         chat_id=conn.execute('SELECT id FROM chats').fetchone()[0]
     result=save_chat.run({'chat':str(chat_id),'output':tmp_path/'out'},Reporter())
-    raw=Path(result['issues_report']).read_text()
+    raw=Path(result['issues_report']).read_text(encoding='utf-8')
     issues=json.loads(raw)['issues']
     assert any(i['code']=='unknown_api_field' and i['field']=='custom_field' for i in issues)
     assert any(i['code']=='source_value_conflict' and i['field']=='sent_at' for i in issues)
@@ -354,15 +354,15 @@ def test_failed_api_history_remains_exportable_and_is_flagged_until_resume(store
         chat_id=conn.execute('SELECT id FROM chats').fetchone()[0]
         assert conn.execute('SELECT message_count FROM chats').fetchone()[0]==200
     result=save_chat.run({'chat':str(chat_id),'output':tmp_path/'partial','language':'ru'},Reporter())
-    issues=json.loads(Path(result['issues_report']).read_text())['issues']
+    issues=json.loads(Path(result['issues_report']).read_text(encoding='utf-8'))['issues']
     assert any(i['code']=='history_unavailable' for i in issues)
-    html=(Path(result['chat_dir'])/'messages'/'messages0.html').read_text()
+    html=(Path(result['chat_dir'])/'messages'/'messages0.html').read_text(encoding='utf-8')
     assert '"saved": 200' in html and '"expected": 205' in html
     assert 'Неполная история' not in html and 'date-divider' not in html
     fake.fail_offset=None
     run_fake(monkeypatch,fake,threads=1,per_request=1)
     result=save_chat.run({'chat':str(chat_id),'output':tmp_path/'complete'},Reporter())
-    assert not any(i['code']=='history_unavailable' for i in json.loads(Path(result['issues_report']).read_text())['issues'])
+    assert not any(i['code']=='history_unavailable' for i in json.loads(Path(result['issues_report']).read_text(encoding='utf-8'))['issues'])
 
 
 def test_pagination_and_stylesheet_match_supplied_vk_reference_exactly():
@@ -370,7 +370,7 @@ def test_pagination_and_stylesheet_match_supplied_vk_reference_exactly():
     from vkdump.modules.save_chat import templates
     from vkdump.modules.save_chat.generic import pagination
     fixture=Path(__file__).parent/'fixtures'/'vk-pagination.html'
-    assert pagination(2,25,50)==fixture.read_text()
+    assert pagination(2,25,50)==fixture.read_text(encoding='utf-8')
     assert hashlib.sha256((templates.ROOT/'style.css').read_bytes()).hexdigest()=='e2d1faf341c69ca7dd781c0fc4cc6a081db202e068701433b46132890256c7b8'
 
 
@@ -380,7 +380,7 @@ def test_diagnostics_are_comments_and_paginator_is_inside_original_container(sto
     with db.connection() as conn:
         chat_id=conn.execute('SELECT id FROM chats').fetchone()[0]
     result=save_chat.run({'chat':str(chat_id),'output':tmp_path/'out','language':'ru'},Reporter())
-    html=(Path(result['chat_dir'])/'messages'/'messages0.html').read_text()
+    html=(Path(result['chat_dir'])/'messages'/'messages0.html').read_text(encoding='utf-8')
     class Text(HTMLParser):
         def __init__(self):
             super().__init__();self.parts=[]
@@ -406,14 +406,14 @@ def test_export_menu_and_dialog_counts_follow_archive_layout(tmp_path,lang,count
     from vkdump.modules.save_chat.index import ExportEntry, ExportManifest
     manifest=ExportManifest(chats=[ExportEntry(str(n),str(n),f'Dialog {n}','dm',n,'',chat_id=n+1) for n,_ in counts])
     write_indexes(tmp_path,manifest,lang)
-    root=Elements((tmp_path/'index.html').read_text())
+    root=Elements((tmp_path/'index.html').read_text(encoding='utf-8'))
     link=root.with_class('menu__page-link')[0]
     assert link['attrs']['href']=='messages/index-messages.html'
     assert [p['attrs'].get('class') for p in link['parents'][3:]]==[
         'page_content clear_fix','menu','page_block','wrap_page_content','item','item__main','index-row']
     assert len(root.with_class('item'))==1
     assert not root.with_class('message-peer') and not root.with_class('item__tertiary')
-    dialogs=Elements((tmp_path/'messages'/'index-messages.html').read_text())
+    dialogs=Elements((tmp_path/'messages'/'index-messages.html').read_text(encoding='utf-8'))
     content=dialogs.with_class('wrap_page_content')[0]
     assert [p['attrs'].get('class') for p in content['parents'][-2:]]==['page_content clear_fix','page_block']
     assert dialogs.with_class('ui_crumb')[0]['attrs']['href']=='../index.html'
@@ -443,7 +443,7 @@ def test_timezone_timestamps_export_all_chats_without_skips(store,tmp_path,raw,e
     assert outcome.status=='success',outcome.error
     assert outcome.result['chats_rendered']==2 and not outcome.result['skipped']
     for result in outcome.result['per_chat']:
-        text=(tmp_path/'out'/result['chat_slug']/'messages'/'messages0.html').read_text()
+        text=(tmp_path/'out'/result['chat_slug']/'messages'/'messages0.html').read_text(encoding='utf-8')
         assert '13 окт 2026 в 10:45:54' in text or '13 окт 2026 в 10:45:55' in text
     assert_portable(tmp_path/'out')
 
@@ -494,7 +494,7 @@ def test_download_media_then_save_chat_inlines_portable_photo(store,monkeypatch,
     assert outcome.status=='success',outcome.error
     result=outcome.result
     page=Path(result['chat_dir'])/'messages'/'messages0.html'
-    image=next(n for n in Elements(page.read_text()).nodes if n['tag']=='img')['attrs']
+    image=next(n for n in Elements(page.read_text(encoding='utf-8')).nodes if n['tag']=='img')['attrs']
     assert 'max-width:100%' in image['style']
     copied=(page.parent/image['src']).resolve()
     assert copied.read_bytes()==photo
@@ -516,7 +516,7 @@ def test_replies_and_forwards_are_separate_quotes_before_reply_text(store,tmp_pa
         chat_id=conn.execute('SELECT id FROM chats').fetchone()[0]
     output=tmp_path/lang
     result=save_chat.run({'chat':str(chat_id),'output':output,'language':lang,'page_size':1},Reporter())
-    html=(Path(result['chat_dir'])/'messages'/'messages0.html').read_text()
+    html=(Path(result['chat_dir'])/'messages'/'messages0.html').read_text(encoding='utf-8')
     dom=Elements(html)
     reply=dom.with_class('reply')[0]
     forwards=dom.with_class('forward')

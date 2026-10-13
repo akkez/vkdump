@@ -47,7 +47,7 @@ def check_bundle(directory: Path, platform_name: str) -> None:
 
 def version_tag(raw: str = '') -> str:
     if not raw:
-        raw = tomllib.loads((ROOT / 'pyproject.toml').read_text())['project']['version']
+        raw = tomllib.loads((ROOT / 'pyproject.toml').read_text(encoding='utf-8'))['project']['version']
     tag = raw if raw.startswith('v') else f'v{raw}'
     if not re.fullmatch(r'v\d+(?:\.\d+){1,2}(?:[-+][A-Za-z0-9.-]+)?', tag):
         raise ValueError('Expected a version tag such as v0.3')

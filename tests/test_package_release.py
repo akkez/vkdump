@@ -39,7 +39,8 @@ def test_all_release_archives_have_one_versioned_root_and_validate_extraction(tm
     else:
         with tarfile.open(archive) as tar:
             members=tar.getnames()
-            assert tar.getmember('vkdump-v9.8.7/vkdump-cli').mode & 0o111
+            if sys.platform != 'win32':
+                assert tar.getmember('vkdump-v9.8.7/vkdump-cli').mode & 0o111
     assert {name.split('/')[0] for name in members}=={'vkdump-v9.8.7'}
     assert len(checked)==1
 
@@ -68,7 +69,7 @@ def test_generated_cask_installs_app_from_versioned_directory(tmp_path,monkeypat
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys,'argv',['update_cask.py','v9.8.7','--artifacts',str(artifacts)])
     update_cask.main()
-    cask=(tmp_path/'Casks'/'vkdump.rb').read_text()
+    cask=(tmp_path/'Casks'/'vkdump.rb').read_text(encoding='utf-8')
     assert 'app "vkdump-v#{version}/VKdump.app"' in cask
     assert 'version "9.8.7"' in cask
     assert hashlib.sha256(b'arm64').hexdigest() in cask

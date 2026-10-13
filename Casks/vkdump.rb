@@ -1,9 +1,9 @@
 cask "vkdump" do
   arch arm: "arm64", intel: "x86_64"
 
-  version "0.3"
-  sha256 arm:   "19d947ef5780ad58484bcd0a9b4db3a273089feb891f5ce499d7262a6ade704c",
-         intel: "528c2926c47b937825ea284e55487ceedfe78ebf26bffc1adc09a1ceeec3b03a"
+  version "0.4"
+  sha256 arm:   "beb27abc19004c30f3932511c30f0976a634f0d9455efcd9eb256fe5df4cd0b0",
+         intel: "74df0d42c44e708f68c250fc514d67da8f6366cfac20e3347714b8150fd06a4e"
 
   url "https://github.com/akkez/vkdump/releases/download/v#{version}/vkdump-macos-#{arch}.zip"
   name "VKdump"
@@ -12,7 +12,7 @@ cask "vkdump" do
 
   depends_on macos: :sonoma
 
-  app "VKdump.app"
+  app "vkdump-v#{version}/VKdump.app"
 
   postflight_steps do
     run "/usr/bin/xattr",

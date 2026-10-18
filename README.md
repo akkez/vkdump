@@ -2,6 +2,8 @@
 
 Parse and export VK chat archives.
 
+<img src="docs/images/vk-dump-wizard.jpg" alt="VK Dump Wizard" height="500">
+
 ## Install on macOS
 
 ```sh

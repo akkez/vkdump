@@ -1,6 +1,6 @@
 [project]
 name = "vkdump"
-version = "0.4.0"
+version = "0.5.0"
 description = "Parse and enrich VK chat dumps into a local SQLite store."
 requires-python = ">=3.12"
 dependencies = [

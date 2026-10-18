@@ -23,8 +23,8 @@ from .fetch_data import (
 )
 
 PAGE_SIZE = 200
-DEFAULT_THREADS = 5
-DEFAULT_CALLS_PER_EXECUTE = 15
+DEFAULT_THREADS = 1
+DEFAULT_CALLS_PER_EXECUTE = 5
 
 
 def _log(progress: ProgressReporter, event: str, **fields) -> None:

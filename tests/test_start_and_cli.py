@@ -90,6 +90,42 @@ def test_start_navigation_and_same_authorization_dialog(window, monkeypatch):
     assert start._threads.value() == 6
 
 
+@pytest.mark.parametrize('saved, expected', [(None, 15), ('37', 37)])
+def test_media_timeout_editor(store, qapp, saved, expected):
+    from vkdump.gui.task_panel import TaskPanel
+    from vkdump.tasks.registry import get_task
+    if saved is not None:
+        app_config.set('enrich_media.last_timeout', saved)
+    panel = TaskPanel(get_task('enrich-media'))
+    editor = panel._editors['timeout']
+    assert editor.value() == expected
+    assert editor.minimum() == 1
+    editor.setValue(42)
+    assert panel._collect_params()['timeout'] == 42
+    panel.deleteLater()
+    qapp.processEvents()
+
+
+@pytest.mark.parametrize('command', ['download-media', 'enrich-media'])
+@pytest.mark.parametrize('options, expected', [([], 15), (['--timeout', '37'], 37), (['-t', '1'], 1)])
+def test_media_timeout_cli(monkeypatch, command, options, expected):
+    calls = []
+    monkeypatch.setattr(cli, '_run', lambda task, params: calls.append((task, params)))
+    result = CliRunner().invoke(cli.app, [command, *options])
+    assert result.exit_code == 0, result.output
+    assert calls[0][0] == 'enrich-media'
+    assert calls[0][1]['timeout'] == expected
+
+
+@pytest.mark.parametrize('timeout', ['0', '-1'])
+def test_media_timeout_cli_rejects_nonpositive(monkeypatch, timeout):
+    calls = []
+    monkeypatch.setattr(cli, '_run', lambda *args: calls.append(args))
+    result = CliRunner().invoke(cli.app, ['download-media', '--timeout', timeout])
+    assert result.exit_code == 2
+    assert calls == []
+
+
 def test_start_follows_settings_account_and_reauthorization(window):
     vk_auth.persist('synthetic-token', auth_info())
     window.data_changed.emit()
@@ -109,7 +145,8 @@ def test_start_follows_settings_account_and_reauthorization(window):
 
 def test_start_return_preserves_download_context_and_refreshes_account(window):
     start = window._start_view
-    assert window._download_panel._editors['threads'].value() == 5
+    assert window._download_panel._editors['threads'].value() == 1
+    assert window._download_panel._editors['per_request'].value() == 5
     _go_to_download(start)
     start._threads.setValue(7)
     start._calls.setValue(13)
@@ -309,7 +346,7 @@ def test_cli_download_passes_settings_to_the_shared_task(monkeypatch):
     monkeypatch.setattr(cli, '_run', lambda name, params: tasks.append((name, params)))
     default_result = CliRunner().invoke(cli.app, ['download-messages'])
     assert default_result.exit_code == 0
-    assert tasks.pop() == ('download-messages', {'threads': 5, 'per_request': 15, 'account': None})
+    assert tasks.pop() == ('download-messages', {'threads': 1, 'per_request': 5, 'account': None})
     result = CliRunner().invoke(cli.app, ['download-messages', '--threads', '3', '--per-request', '12', '--account', '42'])
     assert result.exit_code == 0, result.output
     assert tasks == [('download-messages', {'threads': 3, 'per_request': 12, 'account': 42})]

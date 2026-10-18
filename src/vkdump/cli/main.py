@@ -14,6 +14,8 @@ from ..core.logging import configure_logging, errors_log_path
 from ..core.orchestrator import execute
 from ..core.progress import Cancelled
 from ..core.runs import list_runs
+from ..modules.download_messages import DEFAULT_CALLS_PER_EXECUTE, DEFAULT_THREADS
+from ..modules.enrich import DEFAULT_TIMEOUT as MEDIA_DEFAULT_TIMEOUT
 from ..tasks.registry import get_task
 from .progress import CliProgress
 
@@ -69,9 +71,9 @@ def authorize_cmd() -> None:
 @app.command("download-messages")
 def download_messages_cmd(
     threads: Annotated[int, typer.Option("--threads", "-t", min=1,
-                                       help="Parallel execute requests.")] = 5,
+                                       help="Parallel execute requests.")] = DEFAULT_THREADS,
     per_request: Annotated[int, typer.Option("--per-request", "-p", min=1, max=25,
-                                           help="History calls per execute.")] = 15,
+                                           help="History calls per execute.")] = DEFAULT_CALLS_PER_EXECUTE,
     account: Annotated[int | None, typer.Option("--account", min=1,
                                                help="VK user ID; defaults to the active account.")] = None,
 ) -> None:
@@ -181,7 +183,8 @@ def parse_dump_cmd(
     _run("parse-dump", {"source": source, "source_timezone": source_tz})
 
 
-@app.command("enrich-media")
+@app.command("download-media")
+@app.command("enrich-media", hidden=True)
 def enrich_media_cmd(
     kinds: Annotated[
         str,
@@ -212,8 +215,9 @@ def enrich_media_cmd(
         int, typer.Option("--per-host", help="Max in-flight requests per CDN host."),
     ] = 8,
     timeout: Annotated[
-        int, typer.Option("--timeout", "-t", help="Per-request total timeout, seconds."),
-    ] = 20,
+        int, typer.Option("--timeout", "-t", min=1,
+                          help="Total time limit for each media request, including reading the response, in seconds."),
+    ] = MEDIA_DEFAULT_TIMEOUT,
 ) -> None:
     """Async-download attachment media into data/static/."""
     kind_list = [k.strip() for k in kinds.split(",") if k.strip()]

@@ -44,7 +44,7 @@ DEFAULT_USER_AGENT = (
 )
 DEFAULT_CONCURRENCY = 16
 DEFAULT_PER_HOST = 8
-DEFAULT_TIMEOUT = 20  # seconds per request
+DEFAULT_TIMEOUT = 15  # seconds per request
 DEFAULT_KINDS: tuple[str, ...] = ("photo",)
 MIN_VALID_BYTES = 128
 # Pre-scan chunk size. Keyset-paginating by a.id in this many rows at a
@@ -105,7 +105,10 @@ def run(params: dict, progress: ProgressReporter) -> dict:
     kinds = _coerce_kinds(params.get("kinds"))
     concurrency = int(params.get("concurrency") or DEFAULT_CONCURRENCY)
     per_host = int(params.get("per_host") or DEFAULT_PER_HOST)
-    timeout_s = int(params.get("timeout") or DEFAULT_TIMEOUT)
+    timeout_value = params.get("timeout")
+    timeout_s = int(DEFAULT_TIMEOUT if timeout_value is None else timeout_value)
+    if timeout_s < 1:
+        raise ValueError("Media request timeout must be at least 1 second")
     chat_scope = params.get("chat_scope")
     if chat_scope in ("", None):
         chat_scope = None

@@ -1,9 +1,9 @@
 cask "vkdump" do
   arch arm: "arm64", intel: "x86_64"
 
-  version "0.5"
-  sha256 arm:   "25c889b900347cc747fa96ff78146d04e98833e2faf85bc17737c0c43bdca03e",
-         intel: "1da6383a99ab4b3293d7c55ea24a6ef7a9c9fc33ca4cf054ee7f291eaf84b61b"
+  version "0.6"
+  sha256 arm:   "f842cacd645ba07acff087dc71b47625bb249fda5e46bdecbfa550205246b5f5",
+         intel: "dcae9ec22ed482a2df2e17f7b5fa5dfa1040cc554ee840afb8f796fb4db4e933"
 
   url "https://github.com/akkez/vkdump/releases/download/v#{version}/vkdump-macos-#{arch}.zip"
   name "VKdump"

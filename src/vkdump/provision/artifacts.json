@@ -1,0 +1,219 @@
+{
+  "schema": 1,
+  "verified_at": "2026-10-17",
+  "platforms": {
+    "macos-arm64": {
+      "abi": "arm64-v8a",
+      "acceleration": "HVF",
+      "artifacts": [
+        {
+          "id": "emulator",
+          "name": "Android emulator",
+          "package": "emulator",
+          "url": "https://dl.google.com/android/repository/emulator-darwin_aarch64-16555280.zip",
+          "size": 420504752,
+          "algorithm": "sha1",
+          "checksum": "4cd3b6f14336a0085b8992eeffe637864839b4ce",
+          "repository": "https://dl.google.com/android/repository/repository2-3.xml"
+        },
+        {
+          "id": "image",
+          "name": "Android 14 system image",
+          "package": "system-images;android-34;google_apis;arm64-v8a",
+          "url": "https://dl.google.com/android/repository/sys-img/google_apis/arm64-v8a-34_r14.zip",
+          "size": 1610393229,
+          "algorithm": "sha1",
+          "checksum": "2fe8b46d419a3400e30f31b0152b241b50c8b99f",
+          "repository": "https://dl.google.com/android/repository/sys-img/google_apis/sys-img2-3.xml"
+        },
+        {
+          "id": "platform-tools",
+          "name": "Android platform tools",
+          "package": "platform-tools",
+          "url": "https://dl.google.com/android/repository/platform-tools_r37.0.1-darwin.zip",
+          "size": 16110554,
+          "algorithm": "sha1",
+          "checksum": "6ae73f4de6452dc57e62ec02b68eed92a4c21661",
+          "repository": "https://dl.google.com/android/repository/repository2-3.xml"
+        },
+        {
+          "id": "tools",
+          "name": "Android command-line tools",
+          "package": "cmdline-tools;latest",
+          "url": "https://dl.google.com/android/repository/commandlinetools-mac_arm64-16111833_latest.zip",
+          "size": 155384151,
+          "algorithm": "sha1",
+          "checksum": "ad03dc49bfacfd52c110b14104ea548b8a07e830",
+          "repository": "https://dl.google.com/android/repository/repository2-3.xml"
+        }
+      ]
+    },
+    "macos-x86_64": {
+      "abi": "x86_64",
+      "acceleration": "HVF",
+      "artifacts": [
+        {
+          "id": "emulator",
+          "name": "Android emulator",
+          "package": "emulator",
+          "url": "https://dl.google.com/android/repository/emulator-darwin_x64-16555280.zip",
+          "size": 493505602,
+          "algorithm": "sha1",
+          "checksum": "155220398c3537b5a5fed77d7678619840293cb4",
+          "repository": "https://dl.google.com/android/repository/repository2-3.xml"
+        },
+        {
+          "id": "image",
+          "name": "Android 14 system image",
+          "package": "system-images;android-34;google_apis;x86_64",
+          "url": "https://dl.google.com/android/repository/sys-img/google_apis/x86_64-34_r14.zip",
+          "size": 1563721130,
+          "algorithm": "sha1",
+          "checksum": "e0f6c9a0691aa27bd597d0deb1bcfdc943ac8ca7",
+          "repository": "https://dl.google.com/android/repository/sys-img/google_apis/sys-img2-3.xml"
+        },
+        {
+          "id": "platform-tools",
+          "name": "Android platform tools",
+          "package": "platform-tools",
+          "url": "https://dl.google.com/android/repository/platform-tools_r37.0.1-darwin.zip",
+          "size": 16110554,
+          "algorithm": "sha1",
+          "checksum": "6ae73f4de6452dc57e62ec02b68eed92a4c21661",
+          "repository": "https://dl.google.com/android/repository/repository2-3.xml"
+        },
+        {
+          "id": "tools",
+          "name": "Android command-line tools",
+          "package": "cmdline-tools;latest",
+          "url": "https://dl.google.com/android/repository/commandlinetools-mac_x86_64-16111833_latest.zip",
+          "size": 155582504,
+          "algorithm": "sha1",
+          "checksum": "112cf9618794a997ff273537d55bee02c22abffe",
+          "repository": "https://dl.google.com/android/repository/repository2-3.xml"
+        }
+      ]
+    },
+    "linux-x86_64": {
+      "abi": "x86_64",
+      "acceleration": "KVM",
+      "artifacts": [
+        {
+          "id": "emulator",
+          "name": "Android emulator",
+          "package": "emulator",
+          "url": "https://dl.google.com/android/repository/emulator-linux_x64-16555280.zip",
+          "size": 353505482,
+          "algorithm": "sha1",
+          "checksum": "3256d0dd7ac10a8ad8c64b1c5f3ce227036d6b5e",
+          "repository": "https://dl.google.com/android/repository/repository2-3.xml"
+        },
+        {
+          "id": "image",
+          "name": "Android 14 system image",
+          "package": "system-images;android-34;google_apis;x86_64",
+          "url": "https://dl.google.com/android/repository/sys-img/google_apis/x86_64-34_r14.zip",
+          "size": 1563721130,
+          "algorithm": "sha1",
+          "checksum": "e0f6c9a0691aa27bd597d0deb1bcfdc943ac8ca7",
+          "repository": "https://dl.google.com/android/repository/sys-img/google_apis/sys-img2-3.xml"
+        },
+        {
+          "id": "platform-tools",
+          "name": "Android platform tools",
+          "package": "platform-tools",
+          "url": "https://dl.google.com/android/repository/platform-tools_r37.0.1-linux.zip",
+          "size": 9054187,
+          "algorithm": "sha1",
+          "checksum": "477254aa5f903c15cf51001717bdf347fb6b53e0",
+          "repository": "https://dl.google.com/android/repository/repository2-3.xml"
+        },
+        {
+          "id": "tools",
+          "name": "Android command-line tools",
+          "package": "cmdline-tools;latest",
+          "url": "https://dl.google.com/android/repository/commandlinetools-linux-16111833_latest.zip",
+          "size": 181052239,
+          "algorithm": "sha1",
+          "checksum": "e025545c62a8e64c7559119566a569fb1dec5f60",
+          "repository": "https://dl.google.com/android/repository/repository2-3.xml"
+        }
+      ]
+    },
+    "windows-x86_64": {
+      "abi": "x86_64",
+      "acceleration": "WHPX",
+      "artifacts": [
+        {
+          "id": "emulator",
+          "name": "Android emulator",
+          "package": "emulator",
+          "url": "https://dl.google.com/android/repository/emulator-windows_x64-16555280.zip",
+          "size": 459979551,
+          "algorithm": "sha1",
+          "checksum": "f6dad179df6127fe8d1b6def347b190507fdbbe3",
+          "repository": "https://dl.google.com/android/repository/repository2-3.xml"
+        },
+        {
+          "id": "image",
+          "name": "Android 14 system image",
+          "package": "system-images;android-34;google_apis;x86_64",
+          "url": "https://dl.google.com/android/repository/sys-img/google_apis/x86_64-34_r14.zip",
+          "size": 1563721130,
+          "algorithm": "sha1",
+          "checksum": "e0f6c9a0691aa27bd597d0deb1bcfdc943ac8ca7",
+          "repository": "https://dl.google.com/android/repository/sys-img/google_apis/sys-img2-3.xml"
+        },
+        {
+          "id": "platform-tools",
+          "name": "Android platform tools",
+          "package": "platform-tools",
+          "url": "https://dl.google.com/android/repository/platform-tools_r37.0.1-win.zip",
+          "size": 8044989,
+          "algorithm": "sha1",
+          "checksum": "e03e78b1d80b396f1c3358e31251cb31740e1110",
+          "repository": "https://dl.google.com/android/repository/repository2-3.xml"
+        },
+        {
+          "id": "tools",
+          "name": "Android command-line tools",
+          "package": "cmdline-tools;latest",
+          "url": "https://dl.google.com/android/repository/commandlinetools-win-16111833_latest.zip",
+          "size": 154957218,
+          "algorithm": "sha1",
+          "checksum": "57d04f2d75eb8e8fffc5000a987e5de4b5a63e9d",
+          "repository": "https://dl.google.com/android/repository/repository2-3.xml"
+        }
+      ]
+    }
+  },
+  "apk": {
+    "id": "vk",
+    "name": "VK for Android 8.199",
+    "package": "com.vkontakte.android",
+    "version_name": "8.199",
+    "version_code": 59196,
+    "size": 190664015,
+    "algorithm": "sha256",
+    "checksum": "9eec7239a71bde0f7d748a55621d5619fd2cb3a2dd2fda80ad4dcf745727000a",
+    "filename": "com.vkontakte.android-8.199-59196.apk",
+    "strict": true,
+    "sources": [
+      {
+        "name": "GitHub \u00b7 akkez/vkdump",
+        "type": "direct",
+        "url": "https://media.githubusercontent.com/media/akkez/vkdump/b39eb1e4732f9e3ff5650cde68a136d6cd34dbc8/dist/com.vkontakte.android-8.199-59196.apk"
+      },
+      {
+        "name": "APKPure",
+        "type": "apkpure",
+        "page_url": "https://apkpure.com/vk/com.vkontakte.android/versions"
+      },
+      {
+        "name": "APKMirror",
+        "type": "apkmirror",
+        "page_url": "https://www.apkmirror.com/apk/vkontakte/vk/vk-8-199-release/"
+      }
+    ]
+  }
+}

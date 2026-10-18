@@ -170,6 +170,7 @@ class MainWindow(QMainWindow):
         per-panel error polls so multi-hundred-ms SELECTs don't keep
         churning in the worker pool after the window is gone.
         """
+        self._start_view._android_download.cancel()
         if self._stats_view is not None:
             self._stats_view.cancel_all()
         for p in self._task_panels:

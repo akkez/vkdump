@@ -12,7 +12,7 @@ from vkdump.cli import main as cli
 from vkdump.core import app_config, db, vk_auth
 from vkdump.gui.auth_dialog import AuthDialog
 from vkdump.gui.main_window import MainWindow
-from vkdump.gui.start_view import WELCOME, SOURCE, IMPORT, DOWNLOAD
+from vkdump.gui.start_view import WELCOME, SOURCE, IMPORT, DOWNLOAD, ANDROID_INTRO, ANDROID_DOWNLOAD
 
 
 @pytest.fixture
@@ -49,10 +49,10 @@ def _go_to_download(start):
     assert start._wizard.currentId() == SOURCE
     start._source_page.account.click()
     start._wizard.button(QWizard.WizardButton.NextButton).click()
-    assert start._wizard.currentId() == DOWNLOAD
+    assert start._wizard.currentId() == (DOWNLOAD if start._source_page.authorized else ANDROID_INTRO)
 
 
-def test_start_navigation_and_same_authorization_dialog(window, monkeypatch):
+def test_start_navigation_and_settings_authorization_dialog(window, monkeypatch):
     assert window._tabs.tabText(0) == 'Start'
     assert window._tabs.currentIndex() == 0
     start = window._start_view
@@ -67,7 +67,11 @@ def test_start_navigation_and_same_authorization_dialog(window, monkeypatch):
     assert window._tabs.currentWidget() is window._import_panel
     window._tabs.setCurrentIndex(0)
     _go_to_download(start)
-    assert not start._download_btn.isEnabled()
+    assert start._wizard.currentId() == ANDROID_INTRO
+    assert not start._android_download.started
+    vk_auth.persist('synthetic-token', auth_info())
+    start.refresh()
+    _go_to_download(start)
     def authorize(self):
         assert isinstance(self, AuthDialog)
         assert any('Authorize and grant access' in label.text() for label in self.findChildren(QLabel))
@@ -75,6 +79,10 @@ def test_start_navigation_and_same_authorization_dialog(window, monkeypatch):
         return QDialog.DialogCode.Accepted
     monkeypatch.setattr(AuthDialog, 'exec', authorize)
     start._auth_btn.click()
+    assert start._wizard.currentId() == ANDROID_INTRO
+    start._wizard.back()
+    assert start._wizard.currentId() == DOWNLOAD
+    window._settings_view._auth_btn.click()
     assert start._download_btn.isEnabled()
     assert 'Test Account (id42)' in start._account_label.text()
     assert start._options.isHidden()
@@ -110,6 +118,8 @@ def test_start_follows_settings_account_and_reauthorization(window):
 def test_start_return_preserves_download_context_and_refreshes_account(window):
     start = window._start_view
     assert window._download_panel._editors['threads'].value() == 5
+    vk_auth.persist('synthetic-token', auth_info())
+    start.refresh()
     _go_to_download(start)
     start._threads.setValue(7)
     start._calls.setValue(13)
@@ -166,7 +176,7 @@ def test_radio_descriptions_select_the_corresponding_source(window, qapp):
     assert start._source_page.account.isChecked()
     assert not start._source_page.archive.isChecked()
     start._wizard.button(QWizard.WizardButton.NextButton).click()
-    assert start._wizard.currentId() == DOWNLOAD
+    assert start._wizard.currentId() == ANDROID_INTRO
 
 
 def test_wizard_and_exit_dialog_have_no_white_border_gutters(window, qapp):
@@ -435,7 +445,7 @@ def test_wizard_fox_appears_after_welcome(window, qapp):
     wizard.next()
     wizard._owner._source_page.account.click()
     wizard.next()
-    assert wizard.currentId() == DOWNLOAD
+    assert wizard.currentId() == ANDROID_INTRO
     assert wizard._fox.isVisible()
     assert wizard._owner._source_page.layout().contentsMargins().left() == 23
 
@@ -448,6 +458,8 @@ def test_wizard_keyboard_navigation_and_space_activation(window, qapp):
     window.activateWindow()
     qapp.processEvents()
     start = window._start_view
+    vk_auth.persist('synthetic-token', auth_info())
+    start.refresh()
     wizard = start._wizard
     next_button = wizard.button(QWizard.WizardButton.NextButton)
     cancel = wizard.button(QWizard.WizardButton.CancelButton)
@@ -482,6 +494,8 @@ def test_wizard_keyboard_navigation_and_space_activation(window, qapp):
     QTest.keyClick(start._auth_btn, Qt.Key.Key_Tab)
     assert wizard.button(QWizard.WizardButton.BackButton).hasFocus()
     QTest.keyClick(wizard.button(QWizard.WizardButton.BackButton), Qt.Key.Key_Tab)
+    assert wizard.button(QWizard.WizardButton.FinishButton).hasFocus()
+    QTest.keyClick(wizard.button(QWizard.WizardButton.FinishButton), Qt.Key.Key_Tab)
     assert cancel.hasFocus()
     QTest.keyClick(cancel, Qt.Key.Key_Tab)
     assert start._auth_btn.hasFocus()
@@ -505,3 +519,159 @@ def test_wizard_archive_link_opens_with_enter(window, qapp, monkeypatch):
     QTest.keyClick(link, Qt.Key.Key_Return)
     assert opened == [ARCHIVE_URL]
     assert wizard.currentId() == SOURCE
+
+
+def _wait_for_ui(qapp, predicate):
+    from PySide6.QtTest import QTest
+    for _ in range(200):
+        qapp.processEvents()
+        if predicate():
+            return
+        QTest.qWait(5)
+    assert predicate()
+
+
+def test_android_intro_does_not_download_until_start(window, monkeypatch, qapp, tmp_path):
+    from vkdump.gui import android_setup
+    from vkdump.provision.prepare import PreparationProgress
+    calls = []
+    def prepare(progress, cancelled, local):
+        calls.append(local)
+        progress(PreparationProgress(400, 1000, 100, 500, 'Android system image'))
+        return tmp_path
+    monkeypatch.setattr(android_setup, 'prepare', prepare)
+    start = window._start_view
+    _go_to_download(start)
+    qapp.processEvents()
+    assert calls == []
+    assert start._wizard.currentId() == ANDROID_INTRO
+    start._wizard.next()
+    assert start._wizard.currentId() == ANDROID_DOWNLOAD
+    _wait_for_ui(qapp, lambda: start._android_download.ready)
+    assert calls == [None]
+    page = start._android_download
+    assert page.overall.value() == 1000
+    assert page.file.value() == 1000
+    assert not start._source_page.authorized
+    assert not start._download_page.ready
+    assert start._wizard.button(QWizard.WizardButton.FinishButton).text() == '&Done'
+    start._wizard.back()
+    assert start._wizard.currentId() == ANDROID_INTRO
+    start._wizard.next()
+    qapp.processEvents()
+    assert calls == [None]
+
+
+def test_android_pause_resume_preserves_wizard_and_requires_manual_apk(window, monkeypatch, qapp):
+    from vkdump.gui import android_setup
+    from vkdump.core.progress import Cancelled
+    from vkdump.provision.catalog import ApkRequired
+    import threading
+    entered = threading.Event()
+    attempts = []
+    def prepare(progress, cancelled, local):
+        attempts.append(local)
+        entered.set()
+        if len(attempts) == 1:
+            if cancelled.wait(2):
+                raise Cancelled()
+            raise AssertionError('Pause was not delivered')
+        raise ApkRequired('Choose VK 8.199 / 59196 APK')
+    monkeypatch.setattr(android_setup, 'prepare', prepare)
+    start = window._start_view
+    _go_to_download(start)
+    start._wizard.next()
+    assert start._wizard.currentId() == ANDROID_DOWNLOAD
+    assert entered.wait(1)
+    assert not start._wizard.button(QWizard.WizardButton.BackButton).isEnabled()
+    start._android_download.pause_button.click()
+    _wait_for_ui(qapp, lambda: not start._android_download.busy)
+    assert 'paused' in start._android_download.status.text()
+    assert start._wizard.button(QWizard.WizardButton.NextButton).isEnabled()
+    start._wizard.next()
+    _wait_for_ui(qapp, lambda: len(attempts) == 2 and not start._android_download.busy)
+    assert not start._android_download.apk_button.isHidden()
+    assert not start._android_download.ready
+    assert start._wizard.currentId() == ANDROID_DOWNLOAD
+
+
+def test_android_apk_picker_works_with_enter_and_keeps_existing_authorization_closed(window, monkeypatch, qapp, tmp_path):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from vkdump.gui import android_setup
+    selected = tmp_path / 'vk.apk'
+    calls = []
+    monkeypatch.setattr(android_setup.QFileDialog, 'getOpenFileName', lambda *args: (str(selected), ''))
+    monkeypatch.setattr(AuthDialog, 'exec', lambda _: pytest.fail('Token authorization was opened'))
+    def prepare(progress, cancelled, local):
+        calls.append(local)
+        return tmp_path
+    monkeypatch.setattr(android_setup, 'prepare', prepare)
+    window.show()
+    start = window._start_view
+    _go_to_download(start)
+    start._wizard._history.append(ANDROID_DOWNLOAD)
+    start._wizard._show_page()
+    start._android_download._finished('', 'Choose VK APK', True)
+    qapp.processEvents()
+    start._android_download.apk_button.setFocus()
+    QTest.keyClick(start._android_download.apk_button, Qt.Key.Key_Return)
+    _wait_for_ui(qapp, lambda: start._android_download.ready)
+    assert calls == [selected]
+
+
+def test_android_download_sizes_and_eta_follow_transfer_lifecycle(window, monkeypatch):
+    from vkdump.core import formatting
+    from vkdump.provision.prepare import PreparationProgress
+    now = [0.0]
+    monkeypatch.setattr(formatting.time, 'monotonic', lambda: now[0])
+    page = window._start_view._android_download
+    page._progress(PreparationProgress(0, 5_000_000_000, 0, 2_000_000_000, 'Android image', True))
+    now[0] = 2
+    page._progress(PreparationProgress(1_000_000_000, 5_000_000_000, 1_000_000_000, 2_000_000_000, 'Android image', True))
+    assert page.overall_label.text() == 'Overall: 1.00 GB / 5.00 GB'
+    assert page.file_size.text() == '1.00 GB / 2.00 GB'
+    assert page.overall_eta.text() == 'ETA: 0:08'
+    assert page.file_eta.text() == 'ETA: 0:02'
+    assert not page.file_eta.isHidden()
+    now[0] = 3
+    page._progress(PreparationProgress(2_000_000_000, 5_000_000_000, 2_000_000_000, 2_000_000_000, 'Verifying Android image…'))
+    assert page.overall_eta.isHidden()
+    assert page.file_eta.isHidden()
+    now[0] = 4
+    page._progress(PreparationProgress(2_000_000_000, 5_000_000_000, 0, 1_000_000, 'Platform tools', True))
+    assert page.overall_eta.isHidden()
+    now[0] = 6
+    page._progress(PreparationProgress(2_000_500_000, 5_000_000_000, 500_000, 1_000_000, 'Platform tools', True))
+    assert page.file_size.text() == '500.00 KB / 1.00 MB'
+    assert page.file_eta.text() == 'ETA: 0:02'
+    page._finished('', 'Download paused. Click Resume to continue.', False)
+    assert page.overall_eta.isHidden()
+    assert page.file_eta.isHidden()
+
+
+def test_temporary_folder_links_open_the_download_directory(window, qapp, monkeypatch, tmp_path):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from vkdump.gui import android_setup
+    from vkdump.provision import catalog
+    directory = tmp_path / 'Android downloads'
+    for page in (window._start_view._android_intro, window._start_view._android_download):
+        assert page.folder_link.directory == catalog.download_directory(catalog.host_target())
+        page.folder_link.set_directory(directory)
+    opened = []
+    def open_url(url):
+        assert directory.is_dir()
+        opened.append(url.toLocalFile())
+        return True
+    monkeypatch.setattr(android_setup.QDesktopServices, 'openUrl', open_url)
+    window.show()
+    _go_to_download(window._start_view)
+    intro = window._start_view._android_intro
+    qapp.processEvents()
+    intro.folder_link.setFocus()
+    QTest.keyClick(intro.folder_link, Qt.Key.Key_Return)
+    assert opened == [str(directory)]
+    assert 'temporary folder</a>' in intro.folder_link.text()
+    window._start_view._android_download.folder_link.linkActivated.emit('')
+    assert opened == [str(directory), str(directory)]

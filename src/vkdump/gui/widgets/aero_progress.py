@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import time
-from collections import deque
+
+from ...core.formatting import ProgressEta
 
 from PySide6.QtCore import Property, QPropertyAnimation, QRectF, Qt
 from PySide6.QtGui import QColor, QLinearGradient, QPainter
@@ -101,25 +102,9 @@ class AeroProgressBar(QProgressBar):
             p.drawText(self.rect(), Qt.AlignCenter, self.text())
 
 
-def _format_eta(seconds: float) -> str:
-    """Format seconds as `0:SS`, `M:SS` or `H:MM:SS`."""
-    if seconds <= 0 or seconds != seconds or seconds == float("inf"):
-        return "—"
-    s = int(round(seconds))
-    if s < 60:
-        return f"0:{s:02d}"
-    if s < 3600:
-        return f"{s // 60}:{s % 60:02d}"
-    h = s // 3600
-    m = (s % 3600) // 60
-    sec = s % 60
-    return f"{h}:{m:02d}:{sec:02d}"
-
-
 class AeroProgressGroup(QWidget):
     """AeroProgressBar with a left status label and a right auto-ETA label."""
 
-    _WINDOW_SECONDS = 8.0
     # Shown until a real total (maximum > minimum) lands. Without this,
     # the verbose "%v / %m (%p%)" template renders empty or as the
     # misleading "0 / 0 (0%)" while the bar is idle / pre-progress.
@@ -147,7 +132,7 @@ class AeroProgressGroup(QWidget):
         root.addLayout(row)
         root.addWidget(self._bar)
 
-        self._samples: deque[tuple[float, int]] = deque()
+        self._estimate = ProgressEta()
         # The format the caller asked for via `setFormat`; applied only
         # when the bar has a real range to count against.
         self._verbose_format: str = "%p%"
@@ -170,17 +155,12 @@ class AeroProgressGroup(QWidget):
         self._apply_format()
 
     def setValue(self, value: int) -> None:
-        now = time.monotonic()
-        prev = self._bar.value()
         self._bar.setValue(value)
-        if value < prev:
-            self._reset_eta_state()
-            return
-        self._samples.append((now, value))
-        cutoff = now - self._WINDOW_SECONDS
-        while len(self._samples) > 2 and self._samples[0][0] < cutoff:
-            self._samples.popleft()
-        self._recompute_eta()
+        estimate = self._estimate.update(value, self._effective_max, now=time.monotonic())
+        if estimate:
+            self._show_eta(estimate)
+        else:
+            self._clear_eta()
 
     def setFormat(self, fmt: str) -> None:
         # Remember what the caller wants used once a real total exists;
@@ -206,7 +186,7 @@ class AeroProgressGroup(QWidget):
             self._bar.setFormat(self._ZERO_FORMAT)
 
     def _reset_eta_state(self) -> None:
-        self._samples.clear()
+        self._estimate.reset()
         self._clear_eta()
 
     def _clear_eta(self) -> None:
@@ -216,21 +196,3 @@ class AeroProgressGroup(QWidget):
     def _show_eta(self, text: str) -> None:
         self._eta.setText(text)
         self._eta.setVisible(True)
-
-    def _recompute_eta(self) -> None:
-        if len(self._samples) < 2:
-            self._clear_eta()
-            return
-        t0, v0 = self._samples[0]
-        t1, v1 = self._samples[-1]
-        dt = t1 - t0
-        dv = v1 - v0
-        if dt <= 0 or dv <= 0:
-            self._clear_eta()
-            return
-        rate = dv / dt
-        remaining = self._bar.maximum() - v1
-        if remaining <= 0:
-            self._show_eta("ETA: done")
-            return
-        self._show_eta(f"ETA: {_format_eta(remaining / rate)}")

@@ -67,3 +67,18 @@ def test_negative_total_is_treated_as_no_total(qapp: QApplication) -> None:
     g.setRange(0, -5)
     g.setValue(0)
     assert g._bar.text() == "0%"
+
+
+def test_existing_progress_widget_uses_shared_eta(qapp, monkeypatch):
+    from vkdump.gui.widgets import aero_progress
+    now = [0.0]
+    monkeypatch.setattr(aero_progress.time, 'monotonic', lambda: now[0])
+    group = _make()
+    group.setRange(0, 100)
+    group.setValue(0)
+    now[0] = 2
+    group.setValue(20)
+    assert group._eta.text() == 'ETA: 0:08'
+    assert not group._eta.isHidden()
+    group.reset()
+    assert group._eta.isHidden()

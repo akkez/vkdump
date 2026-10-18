@@ -30,6 +30,9 @@ vkdump = "vkdump.gui.app:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+exclude = ["/dist/**"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/vkdump"]
 

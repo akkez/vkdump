@@ -82,7 +82,7 @@ def assert_portable(output):
             url=urlsplit(link)
             if url.scheme:
                 continue
-            target=(page.parent/unquote(url.path)).resolve()
+            target=(page.parent/unquote(url.path)).resolve() if url.path else page.resolve()
             assert target.is_relative_to(output.resolve()),link
             assert target.is_file(),link
             if url.fragment and target.suffix=='.html':
@@ -93,6 +93,84 @@ def assert_portable(output):
 def basic(mid,peer=10,**extra):
     return {'id':mid,'conversation_message_id':mid+500,'peer_id':peer,'from_id':10,'date':1700000000+mid,
             'text':f'Сообщение {mid} 🌍','attachments':[],**extra}
+
+
+@pytest.mark.parametrize('lang,label', [('ru','Фотографии'),('en','Photos')])
+def test_database_gallery_links_assets_and_reexport(store,monkeypatch,tmp_path,lang,label):
+    def photo(name):
+        return [{'type':'photo','photo':{'sizes':[{'url':f'https://cdn.example/{name}.png','width':640,'height':480}]}}]
+
+    persist_messages(1,[
+        basic(1,date=1700000001,attachments=photo('first')),
+        basic(2,from_id=12,date=1731628802,attachments=photo('second')),
+        basic(3,date=1731628803,attachments=photo('first')),
+        basic(4,date=1731628804,attachments=photo('missing')),
+        basic(5,date=1731628805,attachments=photo('outside')),
+    ])
+    persist_messages(2,[basic(10,attachments=photo('other-account'))])
+    app=tmp_path/'app';static=app/'data'/'static';static.mkdir(parents=True)
+    image=(Path(__file__).parents[1]/'assets'/'icon.png').read_bytes()
+    for name in ('first','second'):
+        (static/f'{name}.png').write_bytes(image)
+    (static.parent/'outside.png').write_bytes(image)
+    monkeypatch.setattr('vkdump.modules.save_chat.generic.app_dir',lambda:app)
+    with db.connection() as conn:
+        chat_id=conn.execute('SELECT id FROM chats WHERE account_id=1').fetchone()[0]
+        conn.execute("UPDATE messages SET source_file='messages999.html' WHERE chat_id=?",(chat_id,))
+        conn.execute("UPDATE users SET display_name='Alice' WHERE vk_id=10")
+        conn.execute("UPDATE users SET display_name='Bob' WHERE vk_id=12")
+        for name in ('first','second','missing','outside','other-account'):
+            path='../outside.png' if name=='outside' else f'{name}.png'
+            conn.execute("UPDATE attachments SET local_path=?,download_status='ok' WHERE url=?",(path,f'https://cdn.example/{name}.png'))
+    output=tmp_path/'export'
+    params={'chat':str(chat_id),'output':output,'language':lang,'page_size':1}
+    result=save_chat.run(params,Reporter())
+    chat=Path(result['chat_dir']);gallery=chat/'gallery'
+    assert result['renderer']=='database'
+    assert result['photos_page']=='gallery/index.html'
+    assert result['photos_count']==3 and result['assets_copied']==2
+    manifest=json.loads((output/'_export.json').read_text(encoding='utf-8'))['chats'][0]
+    assert manifest['photos_page']=='gallery/index.html' and manifest['photos_count']==3
+    dialogs=Elements((output/'messages'/'index-messages.html').read_text(encoding='utf-8'))
+    link=dialogs.with_class('photos-link')[0]
+    assert ''.join(link['text'])==f'{label} (3)'
+    assert link['attrs']['href']==f'../{result["chat_slug"]}/gallery/index.html'
+    html=(gallery/'index.html').read_text(encoding='utf-8')
+    assert 'id="y2023"' in html and 'id="y2024"' in html
+    assert '../messages/messages4.html#m1' in html
+    assert '../messages/messages2.html#m3' in html
+    assert 'messages999.html' not in html
+    assert 'Alice-10.html' in html and 'Bob-12.html' in html
+    assert len(list(gallery.glob('*.html')))==3
+    inline=set()
+    for page in (chat/'messages').glob('*.html'):
+        inline.update(n['attrs']['src'] for n in Elements(page.read_text(encoding='utf-8')).nodes if n['tag']=='img')
+    thumbnails=[n['attrs']['src'] for n in Elements(html).nodes if n['tag']=='img']
+    assert len(thumbnails)==3 and set(thumbnails)==inline
+    assert len(list((chat/'assets').rglob('*.png')))==2
+    moved=tmp_path/'moved';shutil.copytree(output,moved)
+    shutil.rmtree(app)
+    assert_portable(moved)
+    for page in (moved/result['chat_slug']/'gallery').glob('*.html'):
+        for node in Elements(page.read_text(encoding='utf-8')).nodes:
+            if node['tag']=='img':
+                assert (page.parent/node['attrs']['src']).read_bytes()==image
+    static.mkdir(parents=True)
+    (static/'second.png').write_bytes(image)
+    result=save_chat.run(params|{'page_size':2},Reporter())
+    assert result['photos_count']==1
+    assert not (gallery/'Alice-10.html').exists()
+    for page in (gallery/'index.html',gallery/'Bob-12.html'):
+        html=page.read_text(encoding='utf-8')
+        assert '../messages/messages2.html#m2' in html
+        assert len([n for n in Elements(html).nodes if n['tag']=='img'])==1
+    assert_portable(output)
+    (static/'second.png').unlink()
+    result=save_chat.run(params,Reporter())
+    assert result['photos_count']==0 and result['photos_page']==''
+    assert not list(gallery.glob('*.html'))
+    assert not Elements((output/'messages'/'index-messages.html').read_text(encoding='utf-8')).with_class('photos-link')
+    assert_portable(output)
 
 
 @pytest.mark.parametrize('lang,label,edited', [('ru','Сообщения','изменено'),('en','Messages','edited')])
@@ -222,6 +300,31 @@ def test_archive_path_still_exports_original_cp1251_as_utf8(store,tmp_path):
     assert 'Архивный текст' in html and 'windows-1251' not in html
     assert '<meta charset="utf-8">' in html
     assert (tmp_path/'out'/'style.css').is_file()
+
+
+def test_archive_gallery_uses_original_message_pages(store,monkeypatch,tmp_path):
+    from importlib import import_module
+    archive=make_archive(tmp_path)
+    body='<div class="attachment"><div class="attachment__description">Фотография</div><a class="attachment__link" href="https://cdn.example/photo.png">photo</a></div>'
+    page=archive/'messages'/'10'/'messages0.html'
+    page.write_text(archive_html(42).replace('<div class="kludges"></div>',f'<div class="kludges">{body}</div>'),encoding='utf-8')
+    parse_dump.run({'source':archive},Reporter())
+    app=tmp_path/'app';static=app/'data'/'static';static.mkdir(parents=True)
+    image=(Path(__file__).parents[1]/'assets'/'icon.png').read_bytes()
+    (static/'photo.png').write_bytes(image)
+    monkeypatch.setattr(import_module('vkdump.modules.save_chat.run'),'app_dir',lambda:app)
+    with db.connection() as conn:
+        chat_id=conn.execute('SELECT id FROM chats').fetchone()[0]
+        conn.execute("UPDATE attachments SET local_path='photo.png',download_status='ok' WHERE kind='photo'")
+    result=save_chat.run({'source':archive,'chat':str(chat_id),'output':tmp_path/'out'},Reporter())
+    assert result.get('renderer') is None and result['photos_count']==1
+    chat=Path(result['chat_dir'])
+    html=(chat/'gallery'/'index.html').read_text(encoding='utf-8')
+    assert '../messages/messages0.html#m1' in html
+    thumbnails=[n['attrs']['src'] for n in Elements(html).nodes if n['tag']=='img']
+    inline=[n['attrs']['src'] for n in Elements((chat/'messages'/'messages0.html').read_text(encoding='utf-8')).nodes if n['tag']=='img']
+    assert thumbnails==inline
+    assert (chat/'gallery'/thumbnails[0]).read_bytes()==image
 
 
 def test_empty_partial_missing_and_unparsed_fields_are_flagged(store,tmp_path):

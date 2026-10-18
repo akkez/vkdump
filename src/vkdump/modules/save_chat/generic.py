@@ -13,7 +13,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from ...core.db import app_dir, connection
 from . import templates
 from .index import find_slug_for_chat, upsert
-from .pipeline import AttMeta
+from .pipeline import AttMeta, TransformContext
+from .photos_page import render as render_photos_page
 from .transforms import inline_photo_html
 
 PAGE_SIZE = 50
@@ -194,8 +195,12 @@ def write_indexes(output_dir, manifest, lang):
     shutil.copyfile(templates.ROOT/'style.css',output_dir/'messages.css')
     rows=[]
     for c in manifest.chats:
+        photos_link=''
+        if c.photos_page:
+            href=escape(f'../{c.chat_slug}/{c.photos_page}',quote=True)
+            photos_link=f'<div><a class="photos-link" href="{href}">{labels["photos"]} ({c.photos_count})</a></div>'
         rows.append(templates.render('dialog.html',id=c.chat_id,href=escape(f'../{c.chat_slug}/{c.first_page}',quote=True),
-                                     title=escape(c.title),message_count=templates.message_count(c.message_count,lang)))
+                                     title=escape(c.title),message_count=templates.message_count(c.message_count,lang),photos_link=photos_link))
     directory=output_dir/'messages';directory.mkdir(exist_ok=True)
     (directory/'index-messages.html').write_text(templates.render('dialogs.html',lang=lang,messages=labels['messages'],
         content=''.join(rows) or diagnostic('empty_history')),encoding='utf-8')
@@ -272,8 +277,22 @@ def render_chat(*,chat_meta,output_dir,progress,lang,page_size=PAGE_SIZE,extra_i
     for old in pages_dir.glob('messages*.html'):
         if old.stem[8:].isdigit() and old.name not in {f'messages{n*page_size}.html' for n in range(pages)}:
             old.unlink()
+    ctx=TransformContext(
+        chat_id=chat_id,chat_source_folder=chat_meta.get('source_folder') or '',
+        output_chat_dir=chat_out,pages_dir=pages_dir,static_root=renderer.static_root,
+        url_to_meta={},log=progress.log,
+        copied_assets={source:(pages_dir / relative).resolve() for source,relative in renderer.copied.items()},
+    )
+    photos_page,photos_count=render_photos_page(
+        chat_meta,ctx,first_page='messages0.html',
+        message_pages={mid:f'messages{offset}.html' for mid,offset in reply_pages.items()},
+    )
+    if photos_page:
+        progress.log(f'save-chat: gallery — {photos_count} photos → {photos_page}')
     manifest=upsert(output_dir=output_dir,chat_slug=slug,peer_id=str(chat_meta.get('peer_id') or ''),title=chat_meta.get('title') or slug,
-                    type_=chat_meta.get('type') or '?',message_count=len(ids),first_page='messages/messages0.html',chat_id=chat_id)
+                    type_=chat_meta.get('type') or '?',message_count=len(ids),first_page='messages/messages0.html',chat_id=chat_id,
+                    photos_page=photos_page or '',photos_count=photos_count)
     write_indexes(output_dir,manifest,lang)
     return {'chat_id':chat_id,'chat_slug':slug,'peer_id':str(chat_meta.get('peer_id') or ''),'pages':pages,'blocks':len(ids),
-            'output_dir':str(output_dir),'chat_dir':str(chat_out),'assets_copied':len(renderer.copied),'language':lang,'renderer':'database','flagged_fields':len(issues),'issues_report':str(chat_out/'_issues.json')}
+            'output_dir':str(output_dir),'chat_dir':str(chat_out),'assets_copied':len(ctx.copied_assets),'photos_page':photos_page or '',
+            'photos_count':photos_count,'language':lang,'renderer':'database','flagged_fields':len(issues),'issues_report':str(chat_out/'_issues.json')}

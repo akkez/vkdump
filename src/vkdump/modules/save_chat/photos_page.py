@@ -1,4 +1,4 @@
-"""Per-chat photo gallery: one `photos.html` at the chat root that
+"""Per-chat photo gallery: `gallery/index.html` under the chat folder
 shows every successfully-downloaded photo for the chat, ordered by
 date. Sibling to (not replacement for) the inline-into-messages
 transform — they share the same `assets/` tree via `copied_assets`.
@@ -91,6 +91,8 @@ def render(
     chat_meta: dict,
     ctx: TransformContext,
     first_page: str | None = None,
+    *,
+    message_pages: dict[int, str] | None = None,
 ) -> tuple[str | None, int]:
     """Write `<chat>/gallery/index.html` plus one `<slug>.html` per
     sender who contributed at least one downloaded photo.
@@ -100,21 +102,24 @@ def render(
     has. `first_page` is the basename of the first rendered messages
     file (e.g. `messages0.html`); when present, every gallery page's
     back-link points straight at it, otherwise it falls back to the
-    parent export index. Returns `(folder_link, total_photo_count)`;
+    parent export index. `message_pages` maps VK message IDs to exported
+    page filenames when the export repaginates messages.
+    Returns `(folder_link, total_photo_count)`;
     `folder_link` is `None` when the chat has zero usable photos and
     every page was skipped.
     """
     rows = _fetch_photos(chat_meta["id"])
-    if not rows:
-        return None, 0
     gallery_dir = ctx.output_chat_dir / _GALLERY_DIR
+    if not rows:
+        _remove_stale_pages(gallery_dir, set())
+        return None, 0
     photos: list[_Photo] = []
     for (
         sent_at, local_path, resolution, description, file_size,
         sender_vk_id, sender_display_name, vk_message_id, source_file,
     ) in rows:
-        src = ctx.static_root / local_path
-        if not src.is_file():
+        src = (ctx.static_root / local_path).resolve()
+        if not src.is_relative_to(ctx.static_root.resolve()) or not src.is_file():
             continue
         year = str(sent_at.year) if sent_at else "unknown"
         dst = materialise_photo_asset(src, year, ctx)
@@ -125,6 +130,8 @@ def render(
         # Source page basename + #m<vk_message_id> — offline-first
         # relative link; clicking the photo jumps into the rendered
         # message context instead of opening the bare asset.
+        if message_pages is not None:
+            source_file = message_pages.get(vk_message_id)
         message_anchor = (
             f"../messages/{source_file}#m{vk_message_id}"
             if source_file and vk_message_id is not None
@@ -143,6 +150,7 @@ def render(
             sender_display_name=sender_display_name,
         ))
     if not photos:
+        _remove_stale_pages(gallery_dir, set())
         return None, 0
 
     senders = _build_senders(photos)
@@ -156,6 +164,7 @@ def render(
         current=None, first_page=first_page, nav_page_idx=0,
     )
     (gallery_dir / _MAIN_FILE).write_text(main_html, encoding="utf-8")
+    page_names = {_MAIN_FILE}
 
     # One file per sender. Each picks the window containing its own
     # chip; the pager arrows jump to the first sender of the adjacent
@@ -168,9 +177,18 @@ def render(
             current=sender, first_page=first_page,
             nav_page_idx=_nav_page_for_sender(senders, sender),
         )
-        (gallery_dir / _sender_filename(sender)).write_text(page_html, encoding="utf-8")
+        filename = _sender_filename(sender)
+        (gallery_dir / filename).write_text(page_html, encoding="utf-8")
+        page_names.add(filename)
 
+    _remove_stale_pages(gallery_dir, page_names)
     return _GALLERY_LINK, len(photos)
+
+
+def _remove_stale_pages(directory: Path, keep: set[str]) -> None:
+    for page in directory.glob("*.html"):
+        if page.name not in keep:
+            page.unlink()
 
 
 def _fetch_photos(chat_id: int) -> list[tuple]:
@@ -182,8 +200,7 @@ def _fetch_photos(chat_id: int) -> list[tuple]:
     columns come along so per-sender pages can filter without a second
     query.
 
-    Sender display name is read from ``users.display_name`` (left-join
-    on ``users.vk_id`` against the message's ``sender_vk_id``) so the
+    Sender display name is read from the message's ``sender_user_id`` so the
     deleted-labels backfill — ``"DELETED (Real Name)"`` — surfaces in
     the gallery. Falls back to the per-message ``sender_display_name``
     when there is no matching user row (anonymous / unresolved sender).
@@ -192,13 +209,12 @@ def _fetch_photos(chat_id: int) -> list[tuple]:
         cur = conn.execute(
             "SELECT m.sent_at, a.local_path, a.resolution, a.description,"
             "       a.file_size, m.sender_vk_id,"
-            "       COALESCE(u.display_name, m.sender_display_name)"
+            "       COALESCE(NULLIF(u.display_name, ''), m.sender_display_name)"
             "         AS sender_display_name,"
             "       m.vk_message_id, m.source_file"
             " FROM attachments a"
             " JOIN messages m ON m.id = a.message_id"
-            " LEFT JOIN users u ON u.vk_id = m.sender_vk_id"
-            "                  AND u.provider = m.provider"
+            " LEFT JOIN users u ON u.id = m.sender_user_id"
             " WHERE m.chat_id = ?"
             "   AND a.kind = ?"
             "   AND a.download_status = 'ok'"

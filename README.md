@@ -1,22 +1,34 @@
 # VKdump
 
-Parse and export VK chat archives.
+Скачивание и экспорт переписки из VK
 
-<img src="docs/images/vk-dump-wizard.jpg" alt="VK Dump Wizard" height="500">
+<img src="docs/images/vk-dump-wizard.jpg" alt="vk dump screen" height="500">
 
-## Install on macOS
+## Возможности
+
+- скачивание переписки через VK API или импорт GDPR-архива
+- обогащение архива: выкачивание картинок, которые VK оставил ссылками
+- докачка доступных пересланных сообщений, ответов и всех вложений через VK API
+- экспорт чатов в HTML с картинками
+- галерея фотографий по годам и отправителям
+- всё то же самое в терминале в cli-версии
+
+## Установка и запуск
+
+### macOS
 
 ```sh
 brew tap akkez/vkdump https://github.com/akkez/vkdump
 brew install --cask akkez/vkdump/vkdump
 
-# Open UI
+# GUI
 open -a /Applications/VKdump.app
 
-# CLI
+# из терминала
 /Applications/VKdump.app/Contents/MacOS/vkdump-cli
 ```
 
-## Windows / Linux
+### Windows и Linux
 
-Download from [Releases](https://github.com/akkez/vkdump/releases), extract, and run `vkdump` (`vkdump.exe` on Windows).
+- скачайте [последний релиз](https://github.com/akkez/vkdump/releases),
+- распакуйте и запустите бинарник `vkdump[.exe]`
